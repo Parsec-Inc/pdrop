@@ -6,7 +6,7 @@
            UpgradeCode="6B1F3E52-8C4D-4A7B-9E10-2D5A7C9F4B31">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
              Description="pdrop: compartilhe arquivos, texto e clipboard na rede local" />
-    <MajorUpgrade DowngradeErrorMessage="Uma versão mais nova do pdrop já está instalada." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of pdrop is already installed." />
     <Media Id="1" Cabinet="pdrop.cab" EmbedCab="yes" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
