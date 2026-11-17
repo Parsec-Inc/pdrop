@@ -117,7 +117,22 @@ pub fn discover(id: u64, uid: u128, name: Arc<Mutex<String>>, port: u16, color: 
         move || format!("PDROP3|{id:x}|{port}|{}|{}|{uid:x}|{}", color.load(Ordering::Relaxed), policy.vis.load(Ordering::Relaxed), name.lock().unwrap())
     };
     let b2 = beacon.clone();
+    let sweep_beacon = beacon.clone();
     let tx_policy = policy.clone();
+    let sweep_policy = policy.clone();
+    let sweep = UdpSocket::bind(("0.0.0.0", 0))?;
+    thread::spawn(move || loop {
+        if sweep_policy.vis.load(Ordering::Relaxed) == VIS_HIDDEN {
+            sleep(Duration::from_millis(500));
+            continue;
+        }
+        let beacon = sweep_beacon();
+        for ip in subnet_hosts() {
+            let _ = sweep.send_to(beacon.as_bytes(), (ip, DISCOVERY_PORT));
+            sleep(Duration::from_millis(2));
+        }
+        sleep(Duration::from_millis(1500));
+    });
     thread::spawn(move || loop {
         if tx_policy.vis.load(Ordering::Relaxed) == VIS_HIDDEN {
             sleep(Duration::from_millis(500));
@@ -129,13 +144,12 @@ pub fn discover(id: u64, uid: u128, name: Arc<Mutex<String>>, port: u16, color: 
         let beacon = beacon();
         send(Ipv4Addr::BROADCAST.into(), &beacon);
         direct.iter().for_each(|&ip| send(ip, &beacon));
-        for ip in subnet_hosts() {
-            send(ip.into(), &beacon);
-            sleep(Duration::from_millis(2));
-        }
         let ping = format!("PING|{id:x}|{}", start.elapsed().as_micros());
         let known: Vec<IpAddr> = pings.lock().unwrap().values().map(|p| p.addr.ip()).collect();
-        known.into_iter().for_each(|ip| send(ip, &ping));
+        for ip in known {
+            send(ip, &beacon);
+            send(ip, &ping);
+        }
         sleep(Duration::from_millis(1500));
     });
     thread::spawn(move || {
@@ -164,15 +178,21 @@ pub fn discover(id: u64, uid: u128, name: Arc<Mutex<String>>, port: u16, color: 
                         continue;
                     }
                     let (now, addr) = (Instant::now(), SocketAddr::new(from.ip(), port));
-                    let mut g = peers.lock().unwrap();
-                    match g.get_mut(&pid) {
-                        Some(p) => (p.name, p.addr, p.seen, p.color, p.uid) = (clean(name), addr, now, col, puid),
-                        None => {
-                            g.insert(pid, Peer { id: pid, name: clean(name), addr, seen: now, born: now, rtt: None, color: col, uid: puid });
-                            if !hidden {
-                                let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
+                    let is_new = {
+                        let mut g = peers.lock().unwrap();
+                        match g.get_mut(&pid) {
+                            Some(p) => {
+                                (p.name, p.addr, p.seen, p.color, p.uid) = (clean(name), addr, now, col, puid);
+                                false
+                            }
+                            None => {
+                                g.insert(pid, Peer { id: pid, name: clean(name), addr, seen: now, born: now, rtt: None, color: col, uid: puid });
+                                true
                             }
                         }
+                    };
+                    if is_new && !hidden {
+                        let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
                     }
                 }
                 _ => {}

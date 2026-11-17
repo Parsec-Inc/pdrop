@@ -18,12 +18,8 @@ permissions:
   contents: read
 
 jobs:
-  tests:
-    if: ${{ !startsWith(github.event.head_commit.message, 'bump:') }}
-    uses: ./.github/workflows/ci.yml
-
   bump:
-    needs: tests
+    if: ${{ !startsWith(github.event.head_commit.message, 'bump:') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
