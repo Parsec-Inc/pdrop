@@ -1,5 +1,4 @@
 name: ci
-# PRs; na main roda chamado pelo release.yml, antes do bump
 on:
   pull_request:
   workflow_call:

@@ -1,6 +1,3 @@
-# Push na main: testes, bump pelo commitizen (versão, CHANGELOG e tag vX.Y.Z), pacotes de cada
-# plataforma e release no GitHub. AUR, Snap Store e Homebrew só publicam se a variável do
-# repositório estiver 'true' (Settings > Secrets and variables > Actions); veja docs/PACKAGING.md.
 name: release
 on:
   push:
@@ -47,7 +44,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # sem commit feat/fix desde a última tag, para aqui (exit 21) e nada é publicado
       - name: Bump version
         id: bump
         env:
@@ -67,7 +63,6 @@ jobs:
           echo "released=true" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # a tag sobe antes dos builds para todos os jobs compilarem o mesmo commit
       - name: Push version commit and tag
         if: steps.bump.outputs.released == 'true'
         env:
@@ -78,7 +73,7 @@ jobs:
         if: steps.bump.outputs.released == 'true'
         with: { name: notes, path: release-notes.md }
 
-  linux: # deb + rpm; ubuntu 22.04 para o binário rodar em glibc mais antiga
+  linux:
     needs: bump
     if: needs.bump.outputs.released == 'true'
     runs-on: ubuntu-22.04
@@ -154,11 +149,10 @@ jobs:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
         with:
           snap: ${{ steps.build.outputs.snap }}
-          release: edge # suba para stable depois de testar
+          release: edge
 
   release:
     needs: [bump, linux, arch, windows, macos, snap]
-    # publica o que saiu mesmo se outra plataforma falhar (ex.: runner de macOS sem vaga); só o linux é obrigatório
     if: ${{ !cancelled() && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
