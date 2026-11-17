@@ -76,6 +76,8 @@ jobs:
 
   release:
     needs: [linux, arch, windows, macos, snap]
+    # publica o que saiu mesmo se outra plataforma falhar (ex.: runner de macOS sem vaga); só o linux é obrigatório
+    if: ${{ !cancelled() && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
