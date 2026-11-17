@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- firewalld: portas do pdrop (descoberta na LAN e transferência). -->
+<service>
+  <short>pdrop</short>
+  <description>pdrop: descoberta de peers na rede local e transferência de arquivos, texto e clipboard.</description>
+  <port protocol="udp" port="47474"/>
+  <port protocol="tcp" port="47475"/>
+</service>

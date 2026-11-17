@@ -32,21 +32,31 @@ priority = "optional"
 depends = "libc6 (>= 2.31)"
 recommends = "wl-clipboard | xclip, libnotify-bin"
 extended-description = "Run pdrop on two or more machines on the same network and they appear on each other's radar. Select a peer and drop files, text or your clipboard to them. No accounts, no servers."
+# postinst/prerm abrem e fecham as portas no firewall
+maintainer-scripts = "packaging/linux/"
 assets = [
     ["target/release/pdrop", "usr/bin/", "755"],
     ["assets/pdrop.desktop", "usr/share/applications/", "644"],
     ["assets/pdrop.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["LICENSE", "usr/share/doc/pdrop/", "644"],
     ["README.md", "usr/share/doc/pdrop/", "644"],
+    ["packaging/linux/pdrop.xml", "usr/lib/firewalld/services/pdrop.xml", "644"],
+    ["packaging/linux/ufw-pdrop", "etc/ufw/applications.d/pdrop", "644"],
+    ["packaging/linux/firewall", "usr/share/pdrop/firewall", "755"],
 ]
 
 [package.metadata.generate-rpm]
+post_install_script = "sh /usr/share/pdrop/firewall open"
+pre_uninstall_script = "[ \"$1\" -eq 0 ] && sh /usr/share/pdrop/firewall close; exit 0"
 assets = [
     { source = "target/release/pdrop", dest = "/usr/bin/pdrop", mode = "755" },
     { source = "assets/pdrop.desktop", dest = "/usr/share/applications/pdrop.desktop", mode = "644" },
     { source = "assets/pdrop.png", dest = "/usr/share/icons/hicolor/256x256/apps/pdrop.png", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/pdrop/LICENSE", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/pdrop/README.md", mode = "644", doc = true },
+    { source = "packaging/linux/pdrop.xml", dest = "/usr/lib/firewalld/services/pdrop.xml", mode = "644" },
+    { source = "packaging/linux/ufw-pdrop", dest = "/etc/ufw/applications.d/pdrop", mode = "644", config = true },
+    { source = "packaging/linux/firewall", dest = "/usr/share/pdrop/firewall", mode = "755" },
 ]
 
 [package.metadata.generate-rpm.recommends]

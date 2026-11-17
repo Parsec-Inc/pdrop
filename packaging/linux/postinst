@@ -1,0 +1,4 @@
+#!/bin/sh
+# deb: abre as portas do pdrop depois de instalar.
+[ "$1" = configure ] && sh /usr/share/pdrop/firewall open
+exit 0

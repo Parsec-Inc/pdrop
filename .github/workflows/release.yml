@@ -1,43 +1,119 @@
-# Publica uma release ao empurrar uma tag vX.Y.Z (a versão do Cargo.toml tem que bater).
-# Os jobs de AUR, Snap Store e Homebrew só rodam se a variável do repositório estiver 'true'
-# (Settings > Secrets and variables > Actions); veja docs/PACKAGING.md.
+# Push na main: testes, bump pelo commitizen (versão, CHANGELOG e tag vX.Y.Z), pacotes de cada
+# plataforma e release no GitHub. AUR, Snap Store e Homebrew só publicam se a variável do
+# repositório estiver 'true' (Settings > Secrets and variables > Actions); veja docs/PACKAGING.md.
 name: release
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      increment:
+        description: Incremento da versão
+        required: true
+        type: choice
+        options: [PATCH, MINOR, MAJOR]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  tests:
+    if: ${{ !startsWith(github.event.head_commit.message, 'bump:') }}
+    uses: ./.github/workflows/ci.yml
+
+  bump:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.bump.outputs.released }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # sem commit feat/fix desde a última tag, para aqui (exit 21) e nada é publicado
+      - name: Bump version
+        id: bump
+        env:
+          INCREMENT: ${{ inputs.increment }}
+        run: |
+          set +e
+          uvx --from commitizen cz bump --yes ${INCREMENT:+--increment "$INCREMENT"}
+          status=$?
+          set -e
+          if [ "$status" -eq 21 ]; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+          tag="$(git describe --tags --exact-match HEAD)"
+          uvx --from commitizen cz changelog "$tag" --dry-run > release-notes.md
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # a tag sobe antes dos builds para todos os jobs compilarem o mesmo commit
+      - name: Push version commit and tag
+        if: steps.bump.outputs.released == 'true'
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: git push --atomic origin HEAD:main "$TAG"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.bump.outputs.released == 'true'
+        with: { name: notes, path: release-notes.md }
+
   linux: # deb + rpm; ubuntu 22.04 para o binário rodar em glibc mais antiga
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: tag bate com a versão do Cargo.toml
-        run: test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-deb cargo-generate-rpm --locked
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-deb,cargo-generate-rpm" }
       - run: ./scripts/package.sh linux
       - uses: actions/upload-artifact@v4
         with: { name: linux, path: dist/* }
 
   arch:
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
       - run: ./scripts/package.sh arch
       - uses: actions/upload-artifact@v4
         with: { name: arch, path: dist/* }
 
   windows:
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
     runs-on: windows-latest
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: WiX 3
@@ -49,9 +125,12 @@ jobs:
         with: { name: windows, path: dist/* }
 
   macos:
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/package.sh macos
@@ -59,9 +138,12 @@ jobs:
         with: { name: macos, path: dist/* }
 
   snap:
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
       - uses: snapcore/action-build@v1
         id: build
       - uses: actions/upload-artifact@v4
@@ -75,35 +157,45 @@ jobs:
           release: edge # suba para stable depois de testar
 
   release:
-    needs: [linux, arch, windows, macos, snap]
+    needs: [bump, linux, arch, windows, macos, snap]
     # publica o que saiu mesmo se outra plataforma falhar (ex.: runner de macOS sem vaga); só o linux é obrigatório
     if: ${{ !cancelled() && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.bump.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv dist/release-notes.md .
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$TAG" dist/* -R "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release-notes.md
 
   aur:
-    needs: release
+    needs: [bump, release]
     if: ${{ vars.PUBLISH_AUR == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with: { ref: "${{ needs.bump.outputs.tag }}" }
+      - uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: pdrop
           pkgbuild: ./packaging/arch/PKGBUILD
+          assets: ./packaging/arch/pdrop.install
           updpkgsums: true
           commit_username: ${{ github.actor }}
           commit_email: noreply@github.com
+          commit_message: ${{ needs.bump.outputs.tag }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
   homebrew:
-    needs: release
+    needs: [bump, release]
     if: ${{ vars.PUBLISH_BREW == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -111,6 +203,7 @@ jobs:
         with:
           formula-name: pdrop
           homebrew-tap: Parsec-Inc/homebrew-tap
-          download-url: https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz
+          tag-name: ${{ needs.bump.outputs.tag }}
+          download-url: https://github.com/${{ github.repository }}/archive/refs/tags/${{ needs.bump.outputs.tag }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
