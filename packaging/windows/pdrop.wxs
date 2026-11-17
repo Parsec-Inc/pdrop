@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Compila com WiX 3 e a extensão de firewall (candle/light -ext WixFirewallExtension, no CI do Windows).
+<!-- Compila com WiX 3 (candle/light, no CI do Windows) ou com wixl (msitools, no Linux).
      Variáveis: Version (x.y.z) e Exe (caminho do pdrop.exe). -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
-     xmlns:fw="http://schemas.microsoft.com/wix/FirewallExtension">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*" Name="pdrop" Language="1033" Version="$(var.Version)" Manufacturer="Parsec-Inc"
            UpgradeCode="6B1F3E52-8C4D-4A7B-9E10-2D5A7C9F4B31">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
@@ -19,10 +18,7 @@
 
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="MainExe" Guid="*" Win64="yes">
-        <File Id="PdropExe" Name="pdrop.exe" Source="$(var.Exe)" KeyPath="yes">
-          <!-- descoberta (UDP 47474) e transferência (TCP 47475) na rede local -->
-          <fw:FirewallException Id="PdropFirewall" Name="pdrop" Scope="any" Profile="all" IgnoreFailure="yes" />
-        </File>
+        <File Id="PdropExe" Name="pdrop.exe" Source="$(var.Exe)" KeyPath="yes" />
       </Component>
     </DirectoryRef>
 

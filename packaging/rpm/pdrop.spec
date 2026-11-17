@@ -32,14 +32,6 @@ install -Dm644 assets/pdrop.desktop %{buildroot}%{_datadir}/applications/pdrop.d
 install -Dm644 assets/pdrop.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/pdrop.png
 install -Dm644 packaging/linux/pdrop.xml %{buildroot}%{_prefix}/lib/firewalld/services/pdrop.xml
 install -Dm644 packaging/linux/ufw-pdrop %{buildroot}%{_sysconfdir}/ufw/applications.d/pdrop
-install -Dm755 packaging/linux/firewall %{buildroot}%{_datadir}/pdrop/firewall
-
-%post
-sh %{_datadir}/pdrop/firewall open
-
-%preun
-[ $1 -eq 0 ] && sh %{_datadir}/pdrop/firewall close
-exit 0
 
 %files
 %license LICENSE
@@ -49,7 +41,6 @@ exit 0
 %{_datadir}/icons/hicolor/256x256/apps/pdrop.png
 %{_prefix}/lib/firewalld/services/pdrop.xml
 %config(noreplace) %{_sysconfdir}/ufw/applications.d/pdrop
-%{_datadir}/pdrop/firewall
 
 %changelog
 * Tue Nov 17 2026 Parsec-Inc <noreply@github.com> - 0.1.0-1

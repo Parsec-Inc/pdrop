@@ -9,7 +9,6 @@ license=('MIT')
 # a janela carrega estas bibliotecas em runtime
 depends=('gcc-libs' 'libxkbcommon' 'wayland' 'libx11' 'vulkan-icd-loader')
 makedepends=('cargo')
-install=pdrop.install
 options=('!debug')  # o binário já sai strip do Cargo.toml
 optdepends=('wl-clipboard: clipboard e ponte no Wayland'
             'xclip: clipboard e ponte no X11'
@@ -37,5 +36,4 @@ package() {
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
   install -Dm644 packaging/linux/pdrop.xml "$pkgdir/usr/lib/firewalld/services/pdrop.xml"
   install -Dm644 packaging/linux/ufw-pdrop "$pkgdir/etc/ufw/applications.d/pdrop"
-  install -Dm755 packaging/linux/firewall "$pkgdir/usr/share/pdrop/firewall"
 }

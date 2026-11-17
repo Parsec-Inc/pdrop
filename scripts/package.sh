@@ -33,7 +33,6 @@ arch() {
   tar czf "$work/pdrop-$VERSION.tar.gz" --exclude=./target --exclude=./dist --exclude=./.git \
     --transform "s,^\.,pdrop-$VERSION," .
   sed 's|^source=.*|source=("pdrop-$pkgver.tar.gz")|' packaging/arch/PKGBUILD > "$work/PKGBUILD"
-  cp packaging/arch/pdrop.install "$work/"
   # o build roda numa cópia dentro do container: o host nunca perde acesso a $work
   "$ctr" run --rm --network=host -v "$work:/work:ro,Z" -v "$PWD/dist:/out:Z" archlinux:base-devel bash -c '
     pacman -Syu --noconfirm cargo libxkbcommon wayland libx11 vulkan-icd-loader >/dev/null &&
@@ -59,11 +58,14 @@ msi() {
   local exe out
   exe="$PWD/target/$WIN/release/pdrop.exe"
   out="dist/pdrop-${VERSION}-x86_64.msi"
-  # WiX 3: a exceção no firewall usa a WixFirewallExtension, que o wixl do Linux não tem
-  need candle "WiX 3 no Windows (choco install wixtoolset)"
-  mkdir -p target/wix
-  candle -nologo -arch x64 -ext WixFirewallExtension -dVersion="$VERSION" -dExe="$exe" -out target/wix/pdrop.wixobj packaging/windows/pdrop.wxs
-  light -nologo -spdb -ext WixFirewallExtension -out "$out" target/wix/pdrop.wixobj
+  if command -v wixl >/dev/null; then # Linux: msitools
+    wixl -D Version="$VERSION" -D Exe="$exe" --arch x64 -o "$out" packaging/windows/pdrop.wxs
+  else # Windows: WiX 3
+    need candle "wixl (Linux: sudo dnf install msitools) ou WiX 3 (Windows: candle/light no PATH)"
+    mkdir -p target/wix
+    candle -nologo -arch x64 -dVersion="$VERSION" -dExe="$exe" -out target/wix/pdrop.wixobj packaging/windows/pdrop.wxs
+    light -nologo -spdb -out "$out" target/wix/pdrop.wixobj
+  fi
 }
 
 # macOS: binário universal (Apple Silicon + Intel). Só roda num Mac: precisa do SDK da Apple.

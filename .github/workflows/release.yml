@@ -187,7 +187,6 @@ jobs:
         with:
           pkgname: pdrop
           pkgbuild: ./packaging/arch/PKGBUILD
-          assets: ./packaging/arch/pdrop.install
           updpkgsums: true
           commit_username: ${{ github.actor }}
           commit_email: noreply@github.com

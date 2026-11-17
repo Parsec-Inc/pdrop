@@ -10,7 +10,7 @@ Tudo sai de `scripts/package.sh`, o mesmo script no seu computador e no CI.
 | `scripts/package.sh rpm` | `.rpm` | `cargo install cargo-generate-rpm` |
 | `scripts/package.sh arch` | `.pkg.tar.zst` | podman ou docker (roda `makepkg` num container Arch) |
 | `scripts/package.sh windows` | `.exe` | Linux: `cargo install cargo-xwin` e `rustup target add x86_64-pc-windows-msvc` |
-| `scripts/package.sh msi` | `.msi` (com exceção no firewall) | o de cima + WiX 3 (só Windows: a extensão de firewall não existe no `wixl`) |
+| `scripts/package.sh msi` | `.msi` | o de cima + `sudo dnf install msitools` (Linux) ou WiX 3 (Windows) |
 | `scripts/package.sh macos` | `.tar.gz` universal | **só num Mac** (SDK da Apple) |
 | `scripts/package.sh linux` | deb + rpm | |
 
@@ -34,16 +34,17 @@ Não tem passo manual: todo push na `main` roda `.github/workflows/release.yml`.
 Para forçar uma versão, rode o workflow **release** à mão (*Actions > release > Run workflow*) e
 escolha o incremento. Os commits precisam seguir o Conventional Commits (`feat:`, `fix:`, `ci:`...).
 
-## Permissões que os pacotes configuram
+## Firewall
 
-| Onde | O quê |
-|---|---|
-| Linux (deb, rpm, Arch) | serviço `pdrop` do firewalld e perfil do ufw: UDP 47474 (descoberta) e TCP 47475 (transferência). Ao instalar, `/usr/share/pdrop/firewall open` libera no firewall ativo; ao remover, `close` fecha |
-| Windows (MSI) | exceção do Firewall do Windows para o `pdrop.exe` |
-| snap | os plugs `network` e `network-bind` |
-| macOS | nada: o firewall do macOS pergunta na primeira vez |
+Os pacotes não mexem no firewall. O pdrop confere sozinho (firewalld, ufw, Firewall do Windows e
+do macOS) e, se algo parece bloquear, mostra uma faixa no topo com o comando para liberar; clicar
+copia. Quem decide é o usuário.
 
-Se a porta 47475 estiver ocupada, o pdrop usa uma porta aleatória, que o firewall não cobre.
+Os pacotes de Linux trazem o serviço `pdrop` do firewalld (`/usr/lib/firewalld/services/pdrop.xml`)
+e o perfil `pdrop` do ufw (`/etc/ufw/applications.d/pdrop`), com UDP 47474 (descoberta) e TCP 47475
+(transferência). Eles não ficam ativos sozinhos: `sudo firewall-cmd --permanent --add-service=pdrop`
+ou `sudo ufw allow pdrop`. Se a porta 47475 estiver ocupada, o pdrop usa uma porta aleatória, que
+essas regras não cobrem.
 
 ## Canais de instalação (configuração única)
 
@@ -63,9 +64,9 @@ AUR, COPR e Homebrew baixam o tarball da tag no GitHub, então o repositório pr
 
 ## O que não foi testado
 
-- `.deb`, `.rpm` e o pacote Arch foram gerados; `.deb` e `.rpm` foram instalados e removidos em containers (Debian e Fedora), com os scripts de
-  firewall; o serviço do firewalld passou no `firewall-offline-cmd`. A abertura de portas com
-  firewalld/ufw rodando de verdade não foi exercitada.
+- `.deb`, `.rpm` e o pacote Arch foram gerados; `.deb` e `.rpm` foram instalados e removidos em containers (Debian e Fedora);
+  o serviço do firewalld passou no `firewall-offline-cmd`.
+- O aviso de firewall no app compilou para Linux e Windows, mas não foi visto com um firewall bloqueando de verdade.
 - O `.exe` e o MSI nunca rodaram num Windows. A ponte de clipboard no Windows usa PowerShell e também não foi exercitada.
 - O macOS ainda não compilou no CI (o job foi cancelado na v0.1.2).
-- O MSI com a extensão de firewall e o fluxo novo de release (bump na `main`) só rodam no CI.
+- O fluxo novo de release (bump na `main`) só rodam no CI.
