@@ -11,9 +11,11 @@ keywords = ["airdrop", "lan", "file-transfer", "p2p"]
 categories = ["network-programming"]
 
 [dependencies]
+blake3 = "1.8.7"
 eframe = "0.37.0"
 if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+snow = "0.10.0"
 socket2 = { version = "0.6.5", features = ["all"] }
 
 # só para forçar X11 no Linux: o backend Wayland do winit 0.30 não entrega arquivos arrastados

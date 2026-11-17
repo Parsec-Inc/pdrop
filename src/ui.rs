@@ -5,14 +5,11 @@ use crate::{
 use eframe::egui::{self, Align, Align2, Color32, ColorImage, FontId, Key, Layout, Mesh, Pos2, Rect, RichText, Sense, Shape, Stroke, TextureHandle, TextureOptions, pos2, vec2};
 use std::{f64::consts::TAU, time::Duration};
 
-// Noite, duas pessoas lado a lado trocando algo no escuro: tinta violeta, coral como único calor.
 pub type Rgb = [u8; 3];
 const BG: Rgb = [17, 16, 26];
 const FG: Rgb = [236, 230, 222];
 const MUTED: Rgb = [132, 127, 160];
 const DIM: Rgb = [70, 66, 100];
-/// Paleta de identidade: mesma luminosidade e saturação em OKLCH (L .74, C .16), só o matiz muda.
-/// O índice 0 (coral) é o padrão e o que vai no beacon se ninguém escolher.
 pub const COLORS: [(&str, Rgb); 8] = [
     ("coral", [255, 112, 102]),
     ("âmbar", [227, 154, 7]),
@@ -23,8 +20,6 @@ pub const COLORS: [(&str, Rgb); 8] = [
     ("violeta", [178, 150, 255]),
     ("magenta", [240, 126, 194]),
 ];
-/// Nomes dos ícones, na ordem dos frames de assets/icons.png. O índice 0 é "sem ícone": fica só o ponto.
-/// Cabe em 5 bits porque viaja junto da cor no beacon.
 pub const ICONS: [&str; 11] = ["ponto", "gato", "robô", "laptop", "fantasma", "peixe", "cobra", "coruja", "coração", "estrela", "alien"];
 const OK: Rgb = [130, 214, 170];
 const WARN: Rgb = [255, 190, 90];
@@ -52,21 +47,15 @@ pub fn human(n: u64) -> String {
     if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", ["", "KB", "MB", "GB", "TB"][i]) }
 }
 
-/// Ângulo estável de um peer. O raio vem da latência medida (perto = anel interno).
 fn angle(id: u64) -> f64 {
     (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f64 / (1u64 << 24) as f64 * TAU
 }
 
-/// Ease-out exponencial: sobe rápido e assenta.
 fn out_expo(x: f64) -> f64 {
     1.0 - (-6.0 * x.clamp(0.0, 1.0)).exp()
 }
 
-// ---------- sprites (assets/*.aseprite exportados para PNG) ----------
-
-/// Tamanho de um pixel da arte, em pontos. Tudo (sprites, fonte, radar) vive nessa grade.
 const S: f32 = 2.0;
-/// Tamanho do texto: a fonte tem 11 px de em (assets/font.aseprite), então 22 = 2 pontos por pixel.
 const TXT: f32 = 22.0;
 const DISC: Rgb = [12, 11, 19];
 const GRID: Rgb = [30, 28, 46];
@@ -76,7 +65,6 @@ fn snap(p: Pos2) -> Pos2 {
     pos2((p.x / S).round() * S, (p.y / S).round() * S)
 }
 
-/// Spritesheet horizontal com N frames de mesmo tamanho.
 pub struct Sheet {
     tex: TextureHandle,
     n: usize,
@@ -94,7 +82,6 @@ impl Sheet {
         Self { tex, n }
     }
 
-    /// 9-slice do frame `i`: cantos de `m` px da arte ficam fixos, o miolo estica para caber em `r`.
     fn nine(&self, i: usize, r: Rect, m: f32, tint: Color32) -> Shape {
         let (fw, fh) = (self.tex.size()[0] as f32 / self.n as f32, self.tex.size()[1] as f32);
         let (u0, du) = (i as f32 / self.n as f32, 1.0 / self.n as f32);
@@ -114,7 +101,6 @@ impl Sheet {
         Shape::mesh(mesh)
     }
 
-    /// Desenha o frame `i` centrado em `at`, em escala inteira para o pixel não borrar. `tint` multiplica a cor.
     fn draw(&self, p: &egui::Painter, i: usize, at: Pos2, scale: f32, tint: Color32) {
         let n = self.n as f32;
         let i = (i % self.n) as f32;
@@ -131,12 +117,9 @@ pub struct Sprites {
     transfer: Sheet,
     drop: Sheet,
     logo: Sheet,
-    /// molduras 9-slice: 0 botão, 1 hover, 2 pressionado, 3 desabilitado, 4-5 botão tingível, 6 painel, 7 campo, 8 keycap
     ui: Sheet,
-    /// ícones das ações, na ordem de `Btn`
     actions: Sheet,
     bg: Sheet,
-    /// radar rasterizado na grade, reescrito a cada frame
     radar: Option<TextureHandle>,
 }
 
@@ -157,7 +140,6 @@ impl Sprites {
 }
 
 pub fn setup(ctx: &egui::Context) {
-    // fonte desenhada em assets/font.aseprite, convertida por scripts/font.py; as padrão ficam de reserva para glifos que faltem
     let mut fonts = egui::FontDefinitions::default();
     let tweak = egui::FontTweak { hinting: Some(false), subpixel_binning: Some(false), ..Default::default() };
     fonts.font_data.insert("pdrop".into(), std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/pdrop.ttf")).tweak(tweak)));
@@ -190,15 +172,12 @@ pub fn setup(ctx: &egui::Context) {
     ctx.set_visuals(v);
 }
 
-/// Escala inteira, senão a grade de pixels borra: arredonda a escala nativa da tela.
 fn pixel_scale(ctx: &egui::Context) {
     let want = ctx.native_pixels_per_point().unwrap_or(1.0).round().max(1.0);
     if ctx.pixels_per_point() != want {
         ctx.set_pixels_per_point(want);
     }
 }
-
-// ---------- botões de pixel ----------
 
 #[derive(Clone, Copy)]
 enum Btn {
@@ -211,7 +190,6 @@ enum Btn {
     Cut,
 }
 
-/// Botão-tecla: moldura 9-slice, ícone 8x8, rótulo e o atalho num keycap. `hot` pinta a face com a cor dada.
 fn button(ui: &mut egui::Ui, sp: &Sprites, icon: Option<Btn>, label: &str, key: &str, on: bool, hot: Option<Rgb>) -> egui::Response {
     let font = FontId::proportional(TXT);
     let lab = ui.painter().layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE);
@@ -232,7 +210,6 @@ fn button(ui: &mut egui::Ui, sp: &Sprites, icon: Option<Btn>, label: &str, key: 
     };
     let p = ui.painter();
     p.add(sp.ui.nine(frame, r, 4.0, tint));
-    // a face fica acima dos 2 px de profundidade; pressionado, desce 1 px
     let dy = if down { S } else { 0.0 };
     let cy = r.top() + (r.height() - 2.0 * S) / 2.0 + dy;
     let (ink, sub) = match (on, hot) {
@@ -245,7 +222,7 @@ fn button(ui: &mut egui::Ui, sp: &Sprites, icon: Option<Btn>, label: &str, key: 
         sp.actions.draw(p, b as usize, pos2(x + 4.0 * S, cy), S, ink);
         x += 12.0 * S;
     }
-    let ty = cy - lab.size().y / 2.0; // medido no render: maiúsculas centradas na face
+    let ty = cy - lab.size().y / 2.0;
     p.galley(snap(pos2(x, ty)), lab.clone(), ink);
     x += lab.size().x + 4.0 * S;
     let kr = Rect::from_min_size(snap(pos2(x, cy - 7.0 * S)), vec2(k.size().x + 5.0 * S, 14.0 * S));
@@ -258,7 +235,6 @@ fn button(ui: &mut egui::Ui, sp: &Sprites, icon: Option<Btn>, label: &str, key: 
     resp
 }
 
-/// Painel chanfrado em volta de tudo o que `ui` ainda vai desenhar.
 fn panel(ui: &egui::Ui, sp: &Sprites) {
     let p = ui.ctx().layer_painter(ui.layer_id());
     p.add(sp.ui.nine(6, ui.max_rect().expand(5.0 * S), 4.0, Color32::WHITE));
@@ -267,8 +243,6 @@ fn panel(ui: &egui::Ui, sp: &Sprites) {
 fn pixel_frame(m: f32) -> egui::Frame {
     egui::Frame::NONE.inner_margin(m).outer_margin(0.0)
 }
-
-// ---------- ações (teclado e botões caem aqui) ----------
 
 enum Act {
     None,
@@ -285,8 +259,17 @@ enum Act {
     OpenRename,
     SetName,
     CutBridges,
+    Trust,
+    Vis,
+    Hist,
+    Mark(bool),
+    Clips,
+    ClipStep(isize),
+    ClipPaste,
+    HistStep(isize),
+    HistReveal,
+    HistResend,
     Cancel,
-    /// anda no seletor aberto (cor ou ícone)
     Browse(isize),
     Quit,
 }
@@ -316,20 +299,28 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
             app.grants.lock().unwrap().clear();
             app.flash("pontes recebidas cortadas");
         }
-        Act::Cancel => (app.input, app.rename, app.pick, app.pick_icon) = (None, None, None, None),
+        Act::Trust => app.toggle_trust(peers),
+        Act::Vis => app.cycle_vis(),
+        Act::Hist => app.toggle_hist(),
+        Act::Mark(all) => app.mark(peers, all),
+        Act::Clips => app.toggle_clips(),
+        Act::ClipStep(d) => app.clip_step(d),
+        Act::ClipPaste => app.clip_paste(),
+        Act::HistStep(d) => app.hist_step(d),
+        Act::HistReveal => app.hist_reveal(),
+        Act::HistResend => app.hist_resend(peers),
+        Act::Cancel if app.input.is_none() && app.rename.is_none() && app.pick.is_none() && app.pick_icon.is_none() && app.hist_sel.is_none() && app.clip_sel.is_none() => app.marked.clear(),
+        Act::Cancel => (app.input, app.rename, app.pick, app.pick_icon, app.hist_sel, app.clip_sel) = (None, None, None, None, None, None),
         Act::Browse(d) => {
             let step = |v: u8, n: usize| (v as isize + d).rem_euclid(n as isize) as u8;
             app.pick = app.pick.map(|v| step(v, COLORS.len()));
             app.pick_icon = app.pick_icon.map(|v| step(v, ICONS.len()));
         }
-        Act::Quit => {} // fechar a janela precisa do ctx: tratado em draw
+        Act::Quit => {}
     }
 }
 
 fn keys(ctx: &egui::Context, app: &App) -> Act {
-    // só um campo de texto segura o teclado. Botão ou amostra clicados ganhavam foco no egui
-    // e engoliam todos os atalhos até o Esc; aqui o foco deles é devolvido no mesmo frame.
-    // (fora do closure: ctx.input segura o lock do contexto, e pedir de novo lá dentro trava)
     let typing = ctx.text_edit_focused();
     if !typing {
         if let Some(id) = ctx.memory(|m| m.focused()) {
@@ -347,14 +338,12 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
         let prev = k(Key::ArrowLeft) || k(Key::H) || (k(Key::Tab) && i.modifiers.shift);
         let next = k(Key::ArrowRight) || k(Key::L) || (k(Key::Tab) && !i.modifiers.shift);
         let ok = k(Key::Enter) || k(Key::Space);
-        // ctrl+c chega como Event::Copy, não como tecla (egui-winit)
         if k(Key::Q) || i.events.iter().any(|e| matches!(e, egui::Event::Copy)) {
             return Act::Quit;
         }
         if !app.pending.is_empty() && (k(Key::Y) || k(Key::N)) {
             return Act::Answer(k(Key::Y));
         }
-        // seletor aberto: ←→ anda, enter confirma, esc (acima) cancela
         if let Some(v) = app.pick.or(app.pick_icon) {
             return match () {
                 _ if prev => Act::Browse(-1),
@@ -363,6 +352,23 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
                 _ if ok => Act::SetIcon(v),
                 _ => Act::None,
             };
+        }
+        if app.clip_sel.is_some() {
+            match () {
+                _ if k(Key::ArrowUp) => return Act::ClipStep(-1),
+                _ if k(Key::ArrowDown) => return Act::ClipStep(1),
+                _ if ok => return Act::ClipPaste,
+                _ => {}
+            }
+        }
+        if app.hist_sel.is_some() {
+            match () {
+                _ if k(Key::ArrowUp) => return Act::HistStep(-1),
+                _ if k(Key::ArrowDown) => return Act::HistStep(1),
+                _ if ok => return Act::HistReveal,
+                _ if k(Key::E) => return Act::HistResend,
+                _ => {}
+            }
         }
         match () {
             _ if prev => Act::Step(-1),
@@ -374,16 +380,18 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
             _ if k(Key::B) => Act::Bridge,
             _ if k(Key::X) => Act::CutBridges,
             _ if k(Key::R) => Act::OpenRename,
+            _ if k(Key::T) => Act::Trust,
+            _ if k(Key::M) => Act::Vis,
+            _ if k(Key::G) => Act::Hist,
+            _ if k(Key::A) => Act::Mark(i.modifiers.shift),
+            _ if k(Key::P) => Act::Clips,
             _ => Act::None,
         }
     })
 }
 
-// ---------- tela ----------
-
 pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let ctx = ui.ctx().clone();
-    // arrastar um arquivo para a janela envia direto para quem está selecionado
     let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
     app.send_files(dropped, peers);
     let a = keys(&ctx, app);
@@ -393,7 +401,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     apply(app, a, peers);
 
     pixel_scale(&ctx);
-    // fundo: tile de assets/bg.aseprite repetido na grade
     let all = ctx.content_rect();
     let tile = 32.0 * S;
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(all.width() / tile, all.height() / tile));
@@ -407,7 +414,13 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     });
     egui::Panel::right("xfers").frame(pixel_frame(10.0 * S)).show_separator_line(false).default_size(340.0).size_range(260.0..=540.0).show(ui, |ui| {
         panel(ui, &app.sp);
-        transfers(ui, app)
+        if app.hist_sel.is_some() {
+            history(ui, app)
+        } else if app.clip_sel.is_some() {
+            clips(ui, app)
+        } else {
+            transfers(ui, app)
+        }
     });
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| radar(ui, app, peers));
 }
@@ -417,7 +430,14 @@ fn header(ui: &mut egui::Ui, app: &App, n: usize) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(64.0 * S, 16.0 * S), Sense::hover());
         app.sp.logo.draw(ui.painter(), 0, snap(r.center()), S, Color32::WHITE);
-        ui.label(txt(format!("visível como {}", app.me), MUTED));
+        ui.label(txt(
+            match app.vis() {
+                crate::net::VIS_ALL => format!("visível como {}", app.me),
+                crate::net::VIS_TRUSTED => format!("só confiáveis veem {}", app.me),
+                _ => format!("invisível · você é {}", app.me),
+            },
+            MUTED,
+        ));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let r = match n {
                 0 => format!("procurando{:<3}", ".".repeat((app.anim * 2.0) as usize % 4)),
@@ -425,7 +445,6 @@ fn header(ui: &mut egui::Ui, app: &App, n: usize) {
                 n => format!("{n} por perto"),
             };
             ui.label(txt(r, MUTED));
-            // pontes de clipboard ativas ficam sempre visíveis
             if let Some((_, name, _)) = &app.bridge {
                 ui.label(txt(format!("ponte para {name}"), acc));
             }
@@ -437,7 +456,6 @@ fn header(ui: &mut egui::Ui, app: &App, n: usize) {
     });
 }
 
-/// Faixa de aviso quando o firewall parece bloquear o pdrop; clicar copia o comando para liberar.
 fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
     let Some(w) = app.firewall.lock().unwrap().clone() else { return };
     egui::Panel::top("firewall").frame(pixel_frame(4.0 * S)).show_separator_line(false).show(ui, |ui| {
@@ -452,7 +470,6 @@ fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-/// Imagem do radar em pixels da arte: um texel = S pontos na tela.
 struct Raster {
     w: usize,
     h: usize,
@@ -465,7 +482,6 @@ impl Raster {
             self.px[y as usize * self.w + x as usize] = col;
         }
     }
-    /// losango de raio `r` (r=1 é uma cruz de 5 px)
     fn blip(&mut self, x: i32, y: i32, r: i32, col: Color32) {
         for dy in -r..=r {
             for dx in -r..=r {
@@ -475,7 +491,6 @@ impl Raster {
             }
         }
     }
-    /// círculo de 1 px pelo ponto médio (sem cantos dobrados)
     fn ring(&mut self, cx: i32, cy: i32, r: i32, col: Color32) {
         let (mut x, mut y, mut e) = (r, 0, 1 - r);
         while x >= y {
@@ -504,12 +519,11 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     }
     let (cx, cy) = (w as i32 / 2, h as i32 / 2);
     let r = ((w.min(h) as f64 / 2.0) - 20.0).max(30.0);
-    let sweep = -(t * 1.1); // sentido horário, como radar de verdade
-    // ângulo/raio -> texel (y cresce para baixo) e texel -> centro na tela
+    let sweep = -(t * 1.1);
     let at = |ang: f64, k: f64| (cx + (r * k * ang.cos()).round() as i32, cy - (r * k * ang.sin()).round() as i32);
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
     let place = |q: &Peer| at(angle(q.id), if q.rtt.is_some_and(|ms| ms > 15.0) { 0.83 } else { 0.5 });
-    let granted: Vec<std::net::IpAddr> = app.grants.lock().unwrap().keys().copied().collect();
+    let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let busy: Vec<_> = app.xfers.iter().filter(|x| matches!(x.state, State::Waiting | State::Active)).collect();
 
     if resp.clicked() {
@@ -521,7 +535,6 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         }
     }
 
-    // fundo do radar: disco, mira pontilhada e o rastro da varredura em 4 faixas sólidas (nada de degradê)
     let trail = [0.8, 0.34, 0.18, 0.08].map(|k| mix(DISC, acc, k));
     let mut img = Raster { w, h, px: vec![Color32::TRANSPARENT; w * h] };
     for y in 0..h as i32 {
@@ -536,7 +549,6 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 col = c(GRID);
             }
             let back = (dy.atan2(dx) - sweep).rem_euclid(TAU);
-            // faixas mais finas perto da linha: a frente é nítida, o rastro se dissolve
             if d > r * 0.12 && back < 0.5 {
                 col = trail[match back {
                     b if b < 0.035 => 0,
@@ -551,12 +563,11 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     for k in [1.0, 2.0 / 3.0, 1.0 / 3.0] {
         img.ring(cx, cy, (r * k).round() as i32, c(DIM));
     }
-    let rip = (t * 0.35) % 1.0; // ondulação saindo de você, apagando em degraus
+    let rip = (t * 0.35) % 1.0;
     if rip > 0.05 {
         img.ring(cx, cy, (r * rip).round() as i32, mix(acc, DISC, (rip * 4.0).floor() / 4.0 * 0.8 + 0.1));
     }
 
-    // camada de cima: sprites e nomes, todos encaixados na mesma grade
     let mut labels = vec![];
     for q in peers {
         let ang = angle(q.id);
@@ -564,7 +575,6 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         let at_q = place(q);
         let pos = scr(at_q);
         let sel = app.sel == Some(q.id);
-        // blip: pico quando a varredura passa e decaimento exponencial
         let since = (ang - sweep).rem_euclid(TAU);
         let ping = (-since * 1.4).exp();
         let frame = |e: f64| ((e * 6.0) as usize).min(5);
@@ -572,7 +582,7 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         let gone = ((q.seen.elapsed().as_secs_f64() - 4.0) / 2.0).clamp(0.0, 1.0);
         let base = if sel { pc } else { lerp(MUTED, pc, 0.55 + 0.45 * ping) };
         let out = app.bridge.as_ref().is_some_and(|(id, ..)| *id == q.id) || busy.iter().any(|x| x.peer == q.name && x.up);
-        let inn = granted.contains(&q.addr.ip()) || busy.iter().any(|x| x.peer == q.name && !x.up);
+        let inn = granted.contains(&q.uid) || busy.iter().any(|x| x.peer == q.name && !x.up);
         if out || inn {
             for i in 0..6 {
                 let fr = (t * 0.7 + i as f64 / 6.0) % 1.0;
@@ -581,7 +591,6 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 img.set(x, y, c(acc));
             }
         }
-        // entrada: cresce do ponto em 0.6 s
         img.blip(at_q.0, at_q.1, if age < 0.3 { 0 } else { 1 }, c(lerp(base, DIM, gone)));
         if sel {
             let pulse = ((t * 4.0).sin() > 0.0) as i32;
@@ -611,14 +620,15 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         }
         let icon = (q.color / 8) as usize % ICONS.len();
         if icon > 0 {
-            // órbita leve em volta do ponto, fase própria por peer; posição em pixels inteiros
             let ph = t * 1.3 + ang * 3.0;
             let off = vec2((3.0 * ph.cos()).round() as f32 * S, (-15.0 + (2.0 * ph.sin()).round()) as f32 * S);
             let ic = lerp(if sel { pc } else { lerp(MUTED, pc, 0.7 + 0.3 * ping) }, DIM, gone);
             app.sp.icons.draw(&p, icon, pos + off, S, c(ic));
         }
         let lab = lerp(if sel { pc } else { lerp(MUTED, pc, 0.5 + 0.5 * ping) }, DIM, gone);
-        p.text(snap(pos + vec2(0.0, 5.0 * S)), Align2::CENTER_TOP, &q.name, font.clone(), c(lab));
+        let tags = format!("{}{}", if app.trusted(q.uid) { "*" } else { "" }, if app.marked.contains(&q.id) { "+" } else { "" });
+        let name = if tags.is_empty() { q.name.clone() } else { format!("{tags} {}", q.name) };
+        p.text(snap(pos + vec2(0.0, 5.0 * S)), Align2::CENTER_TOP, name, font.clone(), c(lab));
     }
 
     let ctr = scr((cx, cy));
@@ -660,7 +670,6 @@ fn transfers(ui: &mut egui::Ui, app: &App) {
                         }
                         State::Active => {
                             let fr = if t.size == 0 { 1.0 } else { t.done as f32 / t.size as f32 };
-                            // barra em blocos de 4 px com 1 px de vão: enche bloco a bloco
                             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(260.0), 4.0 * S), Sense::hover());
                             let n = ((r.width() / S + 1.0) / 5.0) as usize;
                             let lit = (fr.clamp(0.0, 1.0) * n as f32).round() as usize;
@@ -686,7 +695,72 @@ fn transfers(ui: &mut egui::Ui, app: &App) {
     });
 }
 
-/// Campo de texto sem moldura do egui, dentro do poço 9-slice (frame 7 de assets/ui.aseprite).
+fn ago(ts: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    match now.saturating_sub(ts) {
+        s if s < 60 => "agora".into(),
+        s if s < 3600 => format!("há {} min", s / 60),
+        s if s < 86400 => format!("há {} h", s / 3600),
+        s => format!("há {} d", s / 86400),
+    }
+}
+
+fn history(ui: &mut egui::Ui, app: &App) {
+    let acc = app.acc();
+    ui.label(txt("HISTÓRICO", MUTED));
+    ui.add_space(4.0 * S);
+    if app.hist.is_empty() {
+        ui.label(txt("Nada por aqui ainda.", FG));
+    }
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (i, r) in app.hist.iter().rev().enumerate() {
+            let sel = app.hist_sel == Some(i);
+            let row = ui.horizontal(|ui| {
+                let (ic, _) = ui.allocate_exact_size(vec2(18.0 * S, 18.0 * S), Sense::hover());
+                let f = if r.kind == 'c' { 1 } else if r.up { 2 } else { 3 };
+                app.sp.transfer.draw(ui.painter(), f, ic.center(), S, c(if sel { acc } else { MUTED }));
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&r.label).strong());
+                        ui.label(txt(format!("{} {}", if r.up { "para" } else { "de" }, r.peer), MUTED));
+                    });
+                    let (m, col) = if r.ok { (format!("{} · {}", human(r.size), ago(r.ts)), MUTED) } else { (format!("falhou · {}", ago(r.ts)), WARN) };
+                    ui.label(txt(m, col));
+                });
+            });
+            if sel {
+                ui.painter().rect_stroke(row.response.rect.expand(2.0 * S), 0.0, Stroke::new(S, c(acc)), egui::StrokeKind::Outside);
+                row.response.scroll_to_me(None);
+            }
+            ui.add_space(5.0 * S);
+        }
+    });
+}
+
+fn clips(ui: &mut egui::Ui, app: &App) {
+    let acc = app.acc();
+    ui.label(txt("CLIPBOARDS RECEBIDOS", MUTED));
+    ui.add_space(4.0 * S);
+    if app.clips.is_empty() {
+        ui.label(txt("Nada recebido nesta sessão.", FG));
+        ui.label(txt("Ficam só na memória e somem ao fechar o pdrop.", MUTED));
+    }
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (i, (from, c)) in app.clips.iter().enumerate() {
+            let sel = app.clip_sel == Some(i);
+            let row = ui.vertical(|ui| {
+                ui.label(txt(format!("de {from}"), if sel { acc } else { MUTED }));
+                ui.label(RichText::new(crate::net::preview(c)));
+            });
+            if sel {
+                ui.painter().rect_stroke(row.response.rect.expand(2.0 * S), 0.0, Stroke::new(S, self::c(acc)), egui::StrokeKind::Outside);
+                row.response.scroll_to_me(None);
+            }
+            ui.add_space(5.0 * S);
+        }
+    });
+}
+
 fn well(ui: &mut egui::Ui, sp: &Sprites, edit: egui::TextEdit) -> egui::Response {
     let slot = ui.painter().add(Shape::Noop);
     let r = ui.add(edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 6))).text_color(c(FG)));
@@ -702,6 +776,7 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         ui.set_min_height(20.0 * S);
         if let Some((t, _)) = app.pending.front().map(|(t, _)| (t.clone(), ())) {
             ui.label(txt(&t.peer, FG));
+            ui.label(txt(format!("[{}]", crate::secure::code(app.uid, t.uid)), DIM));
             match t.kind {
                 'c' => ui.label(txt(format!("quer colar no seu clipboard: {}", t.note), MUTED)),
                 'b' => ui.label(txt("quer ligar uma ponte de clipboard: tudo que copiar vai para o seu", MUTED)),
@@ -723,7 +798,6 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             for (i, (name, rgb)) in COLORS.iter().enumerate() {
                 let (r, resp) = ui.allocate_exact_size(vec2(14.0 * S, 14.0 * S), Sense::click());
                 let on = i as u8 == app.pick.unwrap();
-                // amostra quadrada com contorno escuro; a escolhida sobe 1 px e ganha aro claro
                 let sq = Rect::from_center_size(snap(r.center()) - vec2(0.0, if on { S } else { 0.0 }), vec2(10.0 * S, 10.0 * S));
                 ui.painter().rect_filled(sq.expand(S), 0.0, if on { c(FG) } else { c(INK) });
                 ui.painter().rect_filled(sq, 0.0, c(*rgb));
@@ -767,10 +841,11 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 act = Act::SetName;
             }
         } else if app.input.is_some() {
-            ui.label(txt(format!("para {} ›", to.as_deref().unwrap_or("?")), acc));
+            let n = app.targets(peers).len();
+            ui.label(txt(if n > 1 { format!("para {n} aparelhos ›") } else { format!("para {} ›", to.as_deref().unwrap_or("?")) }, acc));
             let focus = std::mem::take(&mut app.focus);
             let buf = app.input.as_mut().unwrap();
-            let r = well(ui, &app.sp, egui::TextEdit::singleline(buf).hint_text(txt("caminho do arquivo (ou arraste) · ou texto livre", DIM)).desired_width(f32::INFINITY));
+            let r = well(ui, &app.sp, egui::TextEdit::singleline(buf).hint_text(txt("caminho de arquivo ou pasta (ou arraste) · ou texto livre", DIM)).desired_width(f32::INFINITY));
             if focus {
                 r.request_focus();
             }
@@ -781,7 +856,13 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             ui.label(txt(m.clone(), FG));
         } else if let Some(n) = &to {
             ui.label(txt("selecionado", MUTED));
+            if app.marked.len() > 1 {
+                ui.label(txt(format!("(envio para {} marcados)", app.marked.len()), acc));
+            }
             ui.label(txt(n, acc));
+            if let Some(p) = peers.iter().find(|p| Some(p.id) == app.sel) {
+                ui.label(txt(format!("· código {}{}", crate::secure::code(app.uid, p.uid), if app.trusted(p.uid) { " · confiável" } else { "" }), MUTED));
+            }
         } else {
             ui.label(txt("Abra o pdrop em outro aparelho da mesma rede.", MUTED));
         }
@@ -791,9 +872,12 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         ui.spacing_mut().item_spacing = vec2(3.0 * S, 3.0 * S);
         let has = to.is_some();
         let sp = &app.sp;
-        // enviar é a ação principal: ganha a face na sua cor assim que há alguém escolhido
         if button(ui, sp, Some(Btn::Send), "Enviar", "Enter", has, Some(acc)).clicked() {
             act = Act::OpenInput;
+        }
+        let on = app.sel.is_some_and(|id| app.marked.contains(&id));
+        if button(ui, sp, None, if on { "Desmarcar" } else { "Marcar" }, "A", has, on.then_some(acc)).clicked() {
+            act = Act::Mark(false);
         }
         if button(ui, sp, Some(Btn::Clip), "Clipboard", "V", has, None).clicked() {
             act = Act::Clip;
@@ -810,6 +894,31 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         }
         if button(ui, sp, Some(Btn::Name), "Nome", "R", true, None).clicked() {
             act = Act::OpenRename;
+        }
+        let trusted = peers.iter().any(|p| Some(p.id) == app.sel && app.trusted(p.uid));
+        if button(ui, sp, None, if trusted { "Não confiar" } else { "Confiar" }, "T", has, trusted.then_some(acc)).clicked() {
+            act = Act::Trust;
+        }
+        let vis = ["Visível: todos", "Visível: confiáveis", "Invisível"][app.vis() as usize];
+        if button(ui, sp, None, vis, "M", true, (app.vis() != 0).then_some(acc)).clicked() {
+            act = Act::Vis;
+        }
+        if button(ui, sp, None, "Histórico", "G", true, app.hist_sel.is_some().then_some(acc)).clicked() {
+            act = Act::Hist;
+        }
+        if button(ui, sp, None, "Clipboards", "P", true, app.clip_sel.is_some().then_some(acc)).clicked() {
+            act = Act::Clips;
+        }
+        if app.clip_sel.is_some() && button(ui, sp, None, "Colar", "Enter", !app.clips.is_empty(), Some(acc)).clicked() {
+            act = Act::ClipPaste;
+        }
+        if app.hist_sel.is_some() {
+            if button(ui, sp, None, "Mostrar na pasta", "Enter", !app.hist.is_empty(), None).clicked() {
+                act = Act::HistReveal;
+            }
+            if button(ui, sp, None, "Reenviar", "E", has && !app.hist.is_empty(), Some(acc)).clicked() {
+                act = Act::HistResend;
+            }
         }
         if !app.grants.lock().unwrap().is_empty() && button(ui, sp, Some(Btn::Cut), "Cortar ponte recebida", "X", true, Some(WARN)).clicked() {
             act = Act::CutBridges;
