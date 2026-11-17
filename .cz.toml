@@ -5,8 +5,6 @@ version_scheme = "semver2"
 version_provider = "cargo"
 update_changelog_on_bump = true
 annotated_tag = true
-major_version_zero = true
-# arquivos de empacotamento que repetem a versão
 version_files = [
     "packaging/arch/PKGBUILD:^pkgver=",
     "packaging/rpm/pdrop.spec:^Version:",
