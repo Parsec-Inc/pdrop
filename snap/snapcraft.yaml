@@ -1,6 +1,6 @@
 name: pdrop
 base: core24
-version: '0.1.1'
+version: '0.1.2'
 summary: AirDrop-style sharing on your local network
 description: |
   Run pdrop on two or more machines on the same network and they appear on
@@ -17,10 +17,15 @@ apps:
     plugs: [network, network-bind, home]
 
 parts:
+  rust-deps:
+    plugin: nil
+    build-packages: [curl]
+    override-build: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
   pdrop:
     plugin: rust
-    rust-channel: stable   # a edição 2024 pede Rust >= 1.85; o do apt do core24 é mais velho
-    build-snaps: [rustup]  # o plugin rust do core24 só aceita rust-channel com o rustup disponível
+    rust-channel: none
+    after: [rust-deps]
     source: .
     stage-packages: [wl-clipboard, xclip, libnotify-bin]
     override-build: |
