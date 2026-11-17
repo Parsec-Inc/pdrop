@@ -400,6 +400,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     ctx.layer_painter(egui::LayerId::background()).image(app.sp.bg.tex.id(), all, uv, Color32::WHITE);
 
     egui::Panel::top("top").frame(pixel_frame(6.0 * S)).show_separator_line(false).show(ui, |ui| header(ui, app, peers.len()));
+    firewall_bar(ui, app);
     egui::Panel::bottom("bottom").frame(pixel_frame(10.0 * S)).show_separator_line(false).show(ui, |ui| {
         panel(ui, &app.sp);
         footer(ui, app, peers)
@@ -431,6 +432,21 @@ fn header(ui: &mut egui::Ui, app: &App, n: usize) {
             let from: Vec<String> = app.grants.lock().unwrap().values().cloned().collect();
             if !from.is_empty() {
                 ui.label(txt(format!("ponte de {}", from.join(", ")), acc));
+            }
+        });
+    });
+}
+
+/// Faixa de aviso quando o firewall parece bloquear o pdrop; clicar copia o comando para liberar.
+fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
+    let Some(w) = app.firewall.lock().unwrap().clone() else { return };
+    egui::Panel::top("firewall").frame(pixel_frame(4.0 * S)).show_separator_line(false).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(txt(format!("{}. Para liberar:", w.text), WARN));
+            let fix = ui.add(egui::Label::new(txt(&w.fix, FG).monospace()).sense(Sense::click())).on_hover_text("clique para copiar");
+            if fix.clicked() {
+                ui.ctx().copy_text(w.fix.clone());
+                app.flash("copiado");
             }
         });
     });

@@ -1,7 +1,0 @@
-post_install() {
-    sh /usr/share/pdrop/firewall open
-}
-
-pre_remove() {
-    sh /usr/share/pdrop/firewall close
-}

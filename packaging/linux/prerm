@@ -1,4 +1,0 @@
-#!/bin/sh
-# deb: fecha as portas do pdrop antes de remover (não em atualização).
-[ "$1" = remove ] && sh /usr/share/pdrop/firewall close
-exit 0

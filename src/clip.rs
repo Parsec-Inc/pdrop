@@ -63,7 +63,7 @@ pub fn available() -> bool {
 static LAST: Mutex<Option<Clip>> = Mutex::new(None);
 
 /// Windows: sem isso cada leitura do clipboard pisca uma janela de console.
-fn quiet(c: &mut Command) -> &mut Command {
+pub fn quiet(c: &mut Command) -> &mut Command {
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(c, 0x0800_0000);
     c
