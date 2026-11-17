@@ -1,0 +1,4 @@
+[pdrop]
+title=pdrop
+description=Descoberta na rede local e transferência de arquivos, texto e clipboard
+ports=47474/udp|47475/tcp

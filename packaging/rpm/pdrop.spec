@@ -30,6 +30,8 @@ cargo build --release --locked
 install -Dm755 target/release/pdrop %{buildroot}%{_bindir}/pdrop
 install -Dm644 assets/pdrop.desktop %{buildroot}%{_datadir}/applications/pdrop.desktop
 install -Dm644 assets/pdrop.png %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/pdrop.png
+install -Dm644 packaging/linux/pdrop.xml %{buildroot}%{_prefix}/lib/firewalld/services/pdrop.xml
+install -Dm644 packaging/linux/ufw-pdrop %{buildroot}%{_sysconfdir}/ufw/applications.d/pdrop
 
 %files
 %license LICENSE
@@ -37,6 +39,8 @@ install -Dm644 assets/pdrop.png %{buildroot}%{_datadir}/icons/hicolor/256x256/ap
 %{_bindir}/pdrop
 %{_datadir}/applications/pdrop.desktop
 %{_datadir}/icons/hicolor/256x256/apps/pdrop.png
+%{_prefix}/lib/firewalld/services/pdrop.xml
+%config(noreplace) %{_sysconfdir}/ufw/applications.d/pdrop
 
 %changelog
 * Tue Nov 17 2026 Parsec-Inc <noreply@github.com> - 0.1.0-1

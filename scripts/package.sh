@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Gera pacotes em dist/. Local e CI usam este mesmo script.
-#   scripts/package.sh deb | rpm | arch | windows | msi | macos | linux (= deb rpm) | version X.Y.Z
+#   scripts/package.sh deb | rpm | arch | windows | msi | macos | linux (= deb rpm)
+# A versão vem do Cargo.toml; quem sobe é o commitizen na release (ver docs/PACKAGING.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -59,13 +60,11 @@ msi() {
   out="dist/pdrop-${VERSION}-x86_64.msi"
   if command -v wixl >/dev/null; then # Linux: msitools
     wixl -D Version="$VERSION" -D Exe="$exe" --arch x64 -o "$out" packaging/windows/pdrop.wxs
-  elif command -v candle >/dev/null || command -v candle.exe >/dev/null; then # Windows: WiX 3
+  else # Windows: WiX 3
+    need candle "wixl (Linux: sudo dnf install msitools) ou WiX 3 (Windows: candle/light no PATH)"
     mkdir -p target/wix
     candle -nologo -arch x64 -dVersion="$VERSION" -dExe="$exe" -out target/wix/pdrop.wixobj packaging/windows/pdrop.wxs
-    light -nologo -out "$out" target/wix/pdrop.wixobj
-  else
-    echo "faltando wixl (Linux: sudo dnf install msitools) ou WiX 3 (Windows: candle/light no PATH)" >&2
-    exit 1
+    light -nologo -spdb -out "$out" target/wix/pdrop.wixobj
   fi
 }
 
@@ -80,23 +79,11 @@ macos() {
   tar czf "dist/pdrop-${VERSION}-macos-universal.tar.gz" -C target/universal pdrop -C ../.. LICENSE README.md
 }
 
-# troca a versão em todos os arquivos que a repetem
-version() {
-  local v=${1:?uso: package.sh version X.Y.Z}
-  sed -i "0,/^version = \".*\"/s//version = \"$v\"/" Cargo.toml
-  sed -i "s/^pkgver=.*/pkgver=$v/; s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
-  sed -i "s/^Version:.*/Version:        $v/" packaging/rpm/pdrop.spec
-  sed -i "s/^version: .*/version: '$v'/" snap/snapcraft.yaml
-  sed -i "s|/tags/v[0-9.]*\.tar\.gz|/tags/v$v.tar.gz|" packaging/homebrew/pdrop.rb
-  cargo update --workspace --quiet
-  echo "versão $v: confira 'git diff' e crie a tag v$v"
-}
-
 [ $# -ge 1 ] || { sed -n '2,3p' "$0"; exit 1; }
 cmd=$1; shift
 case $cmd in
   linux) deb; rpm ;;
-  deb | rpm | arch | windows | msi | macos | version) "$cmd" "$@" ;;
+  deb | rpm | arch | windows | msi | macos) "$cmd" ;;
   *) echo "pacote desconhecido: $cmd" >&2; exit 1 ;;
 esac
 ls -lh dist

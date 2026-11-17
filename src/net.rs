@@ -18,8 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DISCOVERY_PORT: u16 = 47474;
-const TRANSFER_PORT: u16 = 47475;
+pub const DISCOVERY_PORT: u16 = 47474;
+pub const TRANSFER_PORT: u16 = 47475;
 const MAX_TEXT: u64 = 1 << 20;
 
 #[derive(Clone)]
@@ -402,7 +402,9 @@ fn prepare(input: &str) -> io::Result<Prepared> {
 
 #[allow(clippy::too_many_arguments)]
 fn go(id: u64, to: &Peer, me: &str, kind: char, name: &str, mime: Option<&str>, size: u64, src: &mut dyn Read, tx: &Sender<Msg>) -> io::Result<String> {
-    let mut s = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5))?;
+    // sem resposta quase sempre é firewall de um dos lados; o erro diz o que conferir
+    let mut s = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5))
+        .map_err(|e| io::Error::new(e.kind(), format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})")))?;
     s.set_read_timeout(Some(Duration::from_secs(60)))?;
     s.set_write_timeout(Some(Duration::from_secs(30)))?;
     let name: String = name.chars().filter(|c| !c.is_control()).collect();

@@ -19,13 +19,32 @@ do Homebrew compila o código-fonte na máquina de quem instala (`brew install -
 
 ## Fazer uma release
 
-```bash
-scripts/package.sh version 0.2.0   # atualiza Cargo.toml, PKGBUILD, .spec, snapcraft.yaml e a fórmula
-git commit -am "release 0.2.0" && git tag v0.2.0 && git push --follow-tags
-```
+Não tem passo manual: todo push na `main` roda `.github/workflows/release.yml`.
 
-O push da tag roda `.github/workflows/release.yml`: builda deb, rpm, Arch, MSI, macOS e snap, e
-anexa tudo numa release do GitHub. O job falha se a tag não bater com a versão do `Cargo.toml`.
+1. **tests**: o `ci.yml` (testes e build em Linux, macOS e Windows).
+2. **bump**: o commitizen (`.cz.toml`) calcula a versão pelos commits desde a última tag
+   (`feat` sobe minor, `fix` sobe patch; com `major_version_zero`, nada vira 1.0 sozinho), troca a
+   versão no `Cargo.toml`, `Cargo.lock`, PKGBUILD, `.spec`, `snapcraft.yaml` e na fórmula, escreve o
+   `CHANGELOG.md`, cria a tag `vX.Y.Z` e dá push. Sem `feat`/`fix` desde a última tag, para aqui.
+3. **builds**: deb, rpm, Arch, MSI, macOS e snap, todos da tag nova.
+4. **release**: anexa tudo, com `SHA256SUMS` e as notas do CHANGELOG. Só o linux é obrigatório:
+   se outra plataforma falhar, a release sai sem ela.
+5. **aur**, **homebrew** e o **snap** na loja: só com as variáveis ligadas (abaixo).
+
+Para forçar uma versão, rode o workflow **release** à mão (*Actions > release > Run workflow*) e
+escolha o incremento. Os commits precisam seguir o Conventional Commits (`feat:`, `fix:`, `ci:`...).
+
+## Firewall
+
+Os pacotes não mexem no firewall. O pdrop confere sozinho (firewalld, ufw, Firewall do Windows e
+do macOS) e, se algo parece bloquear, mostra uma faixa no topo com o comando para liberar; clicar
+copia. Quem decide é o usuário.
+
+Os pacotes de Linux trazem o serviço `pdrop` do firewalld (`/usr/lib/firewalld/services/pdrop.xml`)
+e o perfil `pdrop` do ufw (`/etc/ufw/applications.d/pdrop`), com UDP 47474 (descoberta) e TCP 47475
+(transferência). Eles não ficam ativos sozinhos: `sudo firewall-cmd --permanent --add-service=pdrop`
+ou `sudo ufw allow pdrop`. Se a porta 47475 estiver ocupada, o pdrop usa uma porta aleatória, que
+essas regras não cobrem.
 
 ## Canais de instalação (configuração única)
 
@@ -45,8 +64,9 @@ AUR, COPR e Homebrew baixam o tarball da tag no GitHub, então o repositório pr
 
 ## O que não foi testado
 
-- `.deb`, `.rpm`, pacote Arch e `.msi` foram gerados e inspecionados (conteúdo, metadados, dependências), mas **nenhum foi instalado**.
+- `.deb`, `.rpm` e o pacote Arch foram gerados; `.deb` e `.rpm` foram instalados e removidos em containers (Debian e Fedora);
+  o serviço do firewalld passou no `firewall-offline-cmd`.
+- O aviso de firewall no app compilou para Linux e Windows, mas não foi visto com um firewall bloqueando de verdade.
 - O `.exe` e o MSI nunca rodaram num Windows. A ponte de clipboard no Windows usa PowerShell e também não foi exercitada.
-- O macOS nunca foi compilado (precisa de um Mac ou do runner do CI).
-- O `snapcraft.yaml` nunca foi buildado (`strict` com o plug `home`); o CI será o primeiro build real.
-- Os workflows nunca rodaram.
+- O macOS ainda não compilou no CI (o job foi cancelado na v0.1.2).
+- O fluxo novo de release (bump na `main`) só rodam no CI.

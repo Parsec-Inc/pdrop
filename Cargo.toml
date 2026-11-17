@@ -38,6 +38,8 @@ assets = [
     ["assets/pdrop.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["LICENSE", "usr/share/doc/pdrop/", "644"],
     ["README.md", "usr/share/doc/pdrop/", "644"],
+    ["packaging/linux/pdrop.xml", "usr/lib/firewalld/services/pdrop.xml", "644"],
+    ["packaging/linux/ufw-pdrop", "etc/ufw/applications.d/pdrop", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -47,6 +49,8 @@ assets = [
     { source = "assets/pdrop.png", dest = "/usr/share/icons/hicolor/256x256/apps/pdrop.png", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/pdrop/LICENSE", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/pdrop/README.md", mode = "644", doc = true },
+    { source = "packaging/linux/pdrop.xml", dest = "/usr/lib/firewalld/services/pdrop.xml", mode = "644" },
+    { source = "packaging/linux/ufw-pdrop", dest = "/etc/ufw/applications.d/pdrop", mode = "644", config = true },
 ]
 
 [package.metadata.generate-rpm.recommends]

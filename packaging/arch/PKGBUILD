@@ -34,4 +34,6 @@ package() {
   install -Dm644 assets/pdrop.desktop -t "$pkgdir/usr/share/applications/"
   install -Dm644 assets/pdrop.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/pdrop.png"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 packaging/linux/pdrop.xml "$pkgdir/usr/lib/firewalld/services/pdrop.xml"
+  install -Dm644 packaging/linux/ufw-pdrop "$pkgdir/etc/ufw/applications.d/pdrop"
 }

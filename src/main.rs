@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod clip;
+mod firewall;
 mod net;
 mod ui;
 
@@ -47,6 +48,8 @@ pub struct App {
     pub sp: ui::Sprites,
     /// pede foco para o campo de texto que acabou de abrir
     pub focus: bool,
+    /// aviso de firewall bloqueando o pdrop, se houver
+    pub firewall: firewall::Shared,
 }
 
 impl App {
@@ -317,6 +320,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_name = Arc::new(Mutex::new(me.clone()));
     net::discover(id, shared_name.clone(), port, shared_color.clone(), peers.clone(), direct)?;
 
+    let firewall = firewall::watch();
+
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_app_id("pdrop").with_icon(window_icon()).with_title("pdrop").with_inner_size([1000.0, 640.0]).with_min_inner_size([640.0, 420.0]),
         // arrastar e soltar só funciona no backend X11 do winit; com XWayland disponível, vai por ele
@@ -334,7 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |cc| {
             ui::setup(&cc.egui_ctx);
             let sp = ui::Sprites::new(&cc.egui_ctx);
-            Ok(Box::new(App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None, rx, tx, sp, focus: false }))
+            Ok(Box::new(App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None, rx, tx, sp, focus: false, firewall }))
         }),
     )?;
     Ok(())
