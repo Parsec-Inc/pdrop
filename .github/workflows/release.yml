@@ -1,11 +1,8 @@
 name: release
-# PR mergeado na main: testes e builds em paralelo; a tag e a release só saem se tudo passar.
-# O snap é o build mais lento: entra na release (e na Snap Store) depois, quando terminar.
 on:
   pull_request:
     types: [closed]
     branches: [main]
-  # manual só a partir da main
   workflow_dispatch:
     inputs:
       increment:
@@ -22,7 +19,6 @@ permissions:
   contents: read
 
 env:
-  # commit da main que o PR gerou (ou o da execução manual)
   BASE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
 jobs:
@@ -30,8 +26,6 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.pull_request.merged
     uses: ./.github/workflows/ci.yml
 
-  # Cria o commit e a tag do bump só localmente; os builds recebem os dois num git bundle
-  # e o push só acontece no job release, depois dos testes.
   bump:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.pull_request.merged
     runs-on: ubuntu-latest
@@ -168,7 +162,6 @@ jobs:
 
   release:
     needs: [bump, tests, linux, arch, windows, macos]
-    # só com os testes e o linux verdes; os outros builds com falha ficam de fora
     if: ${{ !cancelled() && needs.tests.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
@@ -180,7 +173,6 @@ jobs:
         with: { ref: "${{ env.BASE_SHA }}" }
       - uses: ./.github/actions/release-checkout
         with: { version: "${{ needs.bump.outputs.tag }}" }
-      # a main recebe o commit do bump só agora, com tudo testado e compilado
       - name: Push version commit and tag
         run: git push --atomic origin "$(git rev-parse "$TAG^{commit}"):refs/heads/main" "refs/tags/$TAG"
       - uses: actions/download-artifact@v4
@@ -197,7 +189,6 @@ jobs:
           sha256sum -- * > SHA256SUMS
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --notes-file ../release-notes.md -- *
 
-  # o .snap entra na release quando ficar pronto, e o SHA256SUMS é refeito com ele
   snap-release:
     needs: [bump, release, snap]
     if: ${{ !cancelled() && needs.release.result == 'success' && needs.snap.result == 'success' }}

@@ -841,7 +841,7 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             let n = app.targets(peers).len();
             ui.label(txt(if n > 1 { format!("para {n} aparelhos ›") } else { format!("para {} ›", to.as_deref().unwrap_or("?")) }, acc));
             let focus = std::mem::take(&mut app.focus);
-            #[allow(clippy::unnecessary_unwrap)] // app.targets() acima pega app emprestado; o if let não cabe aqui
+            #[allow(clippy::unnecessary_unwrap)]
             let buf = app.input.as_mut().unwrap();
             let r = well(ui, &app.sp, egui::TextEdit::singleline(buf).hint_text(txt("caminho de arquivo ou pasta (ou arraste) · ou texto livre", DIM)).desired_width(f32::INFINITY));
             if focus {
