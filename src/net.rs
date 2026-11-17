@@ -1,7 +1,7 @@
-//! Descoberta (UDP broadcast) e transferência (TCP) do pdrop.
-//! Protocolo: o remetente manda "PDROP1\t<f|t>\t<bytes>\t<remetente>\t<nome>\n",
-//! o destinatário responde 'Y' ou 'N' (como o aceitar/recusar do AirDrop), depois vêm os bytes.
-use crate::clip;
+use crate::{
+    clip,
+    secure::{self, Secure},
+};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
@@ -15,12 +15,32 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, sleep},
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 pub const DISCOVERY_PORT: u16 = 47474;
 pub const TRANSFER_PORT: u16 = 47475;
 const MAX_TEXT: u64 = 1 << 20;
+const MAX_FILES: usize = 100_000;
+const PARTIAL: &str = ".pdrop-partial";
+
+pub const VIS_ALL: u8 = 0;
+pub const VIS_TRUSTED: u8 = 1;
+pub const VIS_HIDDEN: u8 = 2;
+
+#[derive(Default)]
+pub struct Policy {
+    pub trust: Mutex<HashMap<u128, String>>,
+    pub vis: AtomicU8,
+    pub key: [u8; 32],
+    pub routes: Vec<(String, PathBuf)>,
+}
+
+#[derive(Clone)]
+pub struct Who {
+    pub name: String,
+    pub key: [u8; 32],
+}
 
 #[derive(Clone)]
 pub struct Peer {
@@ -29,10 +49,9 @@ pub struct Peer {
     pub addr: SocketAddr,
     pub seen: Instant,
     pub born: Instant,
-    /// RTT suavizado em ms, medido por PING/PONG; None até o primeiro PONG.
     pub rtt: Option<f64>,
-    /// índice na paleta (ui::COLORS) que o peer escolheu
     pub color: u8,
+    pub uid: u128,
 }
 pub type Peers = Arc<Mutex<HashMap<u64, Peer>>>;
 
@@ -53,17 +72,18 @@ pub struct Transfer {
     pub done: u64,
     pub up: bool,
     pub state: State,
-    /// f arquivo, t texto, c clipboard (uma vez), b ponte de clipboard
     pub kind: char,
-    /// prévia do texto copiado (só clipboard)
     pub note: String,
+    pub src: String,
+    pub uid: u128,
 }
 
-/// IPs que permitiram a ponte de clipboard nesta sessão (valor: nome para mostrar).
-pub type Grants = Arc<Mutex<HashMap<IpAddr, String>>>;
+pub type Grants = Arc<Mutex<HashMap<u128, String>>>;
 
 pub enum Msg {
     BridgeOff,
+    Auto(Transfer),
+    Clip(String, clip::Clip),
     Ask(Transfer, Sender<bool>),
     Start(Transfer),
     Progress(u64, u64),
@@ -79,15 +99,12 @@ pub fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(32).collect()
 }
 
-// ---------- descoberta ----------
-
-// ponytail: só broadcast 255.255.255.255 (interface da rota padrão); mDNS/multi-interface se precisar.
-// `direct`: IPs para onde o beacon também vai em unicast (redes que filtram broadcast).
-pub fn discover(id: u64, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU8>, peers: Peers, direct: Vec<IpAddr>) -> io::Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn discover(id: u64, uid: u128, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU8>, policy: Arc<Policy>, peers: Peers, direct: Vec<IpAddr>) -> io::Result<()> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
-    sock.set_reuse_port(true)?; // permite várias instâncias na mesma máquina
+    sock.set_reuse_port(true)?;
     sock.set_broadcast(true)?;
     sock.bind(&SocketAddr::from(([0, 0, 0, 0], DISCOVERY_PORT)).into())?;
     let rx: UdpSocket = sock.into();
@@ -95,13 +112,17 @@ pub fn discover(id: u64, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU
     let reply = rx.try_clone()?;
     let start = Instant::now();
     let pings = peers.clone();
-    // o beacon é remontado a cada uso para refletir a cor atual
     let beacon = {
-        let (color, name) = (color.clone(), name.clone());
-        move || format!("PDROP1|{id:x}|{port}|{}|{}", color.load(Ordering::Relaxed), name.lock().unwrap())
+        let (color, name, policy) = (color.clone(), name.clone(), policy.clone());
+        move || format!("PDROP3|{id:x}|{port}|{}|{}|{uid:x}|{}", color.load(Ordering::Relaxed), policy.vis.load(Ordering::Relaxed), name.lock().unwrap())
     };
     let b2 = beacon.clone();
+    let tx_policy = policy.clone();
     thread::spawn(move || loop {
+        if tx_policy.vis.load(Ordering::Relaxed) == VIS_HIDDEN {
+            sleep(Duration::from_millis(500));
+            continue;
+        }
         let send = |ip: IpAddr, msg: &str| {
             let _ = tx.send_to(msg.as_bytes(), (ip, DISCOVERY_PORT));
         };
@@ -110,9 +131,8 @@ pub fn discover(id: u64, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU
         direct.iter().for_each(|&ip| send(ip, &beacon));
         for ip in subnet_hosts() {
             send(ip.into(), &beacon);
-            sleep(Duration::from_millis(2)); // não despeja 500 pacotes de uma vez
+            sleep(Duration::from_millis(2));
         }
-        // latência até quem já conhecemos: vira a distância no radar
         let ping = format!("PING|{id:x}|{}", start.elapsed().as_micros());
         let known: Vec<IpAddr> = pings.lock().unwrap().values().map(|p| p.addr.ip()).collect();
         known.into_iter().for_each(|ip| send(ip, &ping));
@@ -122,31 +142,36 @@ pub fn discover(id: u64, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU
         let mut buf = [0u8; 512];
         while let Ok((n, from)) = rx.recv_from(&mut buf) {
             let Ok(s) = std::str::from_utf8(&buf[..n]) else { continue };
-            let mut p = s.splitn(5, '|');
-            match (p.next(), p.next(), p.next(), p.next(), p.next()) {
-                (Some("PING"), Some(_), Some(us), _, _) => {
+            let hidden = policy.vis.load(Ordering::Relaxed) == VIS_HIDDEN;
+            let f: Vec<&str> = s.splitn(7, '|').collect();
+            match f.as_slice() {
+                ["PING", _, us, ..] if !hidden => {
                     let _ = reply.send_to(format!("PONG|{id:x}|{us}").as_bytes(), (from.ip(), DISCOVERY_PORT));
                 }
-                (Some("PONG"), Some(rid), Some(us), _, _) => {
+                ["PONG", rid, us, ..] => {
                     let (Ok(rid), Ok(us)) = (u64::from_str_radix(rid, 16), us.parse::<u128>()) else { continue };
                     let ms = start.elapsed().as_micros().saturating_sub(us) as f64 / 1000.0;
                     if let Some(p) = peers.lock().unwrap().get_mut(&rid) {
                         p.rtt = Some(p.rtt.map_or(ms, |old| old * 0.7 + ms * 0.3));
                     }
                 }
-                (Some("PDROP1"), Some(pid), Some(port), Some(col), Some(name)) => {
-                    let (Ok(pid), Ok(port), Ok(col)) = (u64::from_str_radix(pid, 16), port.parse::<u16>(), col.parse::<u8>()) else { continue };
+                ["PDROP3", pid, port, col, vis, uid, name] => {
+                    let (Ok(pid), Ok(port), Ok(col), Ok(vis), Ok(puid)) = (u64::from_str_radix(pid, 16), port.parse::<u16>(), col.parse::<u8>(), vis.parse::<u8>(), u128::from_str_radix(uid, 16)) else { continue };
                     if pid == id {
+                        continue;
+                    }
+                    if !shown(vis, policy.vis.load(Ordering::Relaxed), policy.trust.lock().unwrap().contains_key(&puid)) {
                         continue;
                     }
                     let (now, addr) = (Instant::now(), SocketAddr::new(from.ip(), port));
                     let mut g = peers.lock().unwrap();
                     match g.get_mut(&pid) {
-                        Some(p) => (p.name, p.addr, p.seen, p.color) = (clean(name), addr, now, col),
+                        Some(p) => (p.name, p.addr, p.seen, p.color, p.uid) = (clean(name), addr, now, col, puid),
                         None => {
-                            g.insert(pid, Peer { id: pid, name: clean(name), addr, seen: now, born: now, rtt: None, color: col });
-                            // peer novo: responde em unicast, assim basta um lado conhecer o IP do outro
-                            let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
+                            g.insert(pid, Peer { id: pid, name: clean(name), addr, seen: now, born: now, rtt: None, color: col, uid: puid });
+                            if !hidden {
+                                let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
+                            }
                         }
                     }
                 }
@@ -157,9 +182,10 @@ pub fn discover(id: u64, name: Arc<Mutex<String>>, port: u16, color: Arc<AtomicU
     Ok(())
 }
 
-/// Todos os IPs das sub-redes locais. Redes de Wi-Fi costumam filtrar broadcast mas deixam passar
-/// unicast, então varrer a sub-rede é o que faz a descoberta funcionar sozinha.
-// ponytail: só sub-redes até /22 (1022 hosts); redes maiores contam com o broadcast.
+fn shown(theirs: u8, mine: u8, trusted: bool) -> bool {
+    trusted || (theirs != VIS_TRUSTED && mine != VIS_TRUSTED)
+}
+
 fn subnet_hosts() -> Vec<Ipv4Addr> {
     let mut v = vec![];
     for i in if_addrs::get_if_addrs().unwrap_or_default() {
@@ -175,114 +201,260 @@ fn subnet_hosts() -> Vec<Ipv4Addr> {
     v
 }
 
-// ---------- receber ----------
-
-pub fn listen(dir: PathBuf, tx: Sender<Msg>, grants: Grants) -> io::Result<u16> {
+pub fn listen(dir: PathBuf, tx: Sender<Msg>, grants: Grants, policy: Arc<Policy>) -> io::Result<u16> {
     let l = TcpListener::bind(("0.0.0.0", TRANSFER_PORT)).or_else(|_| TcpListener::bind(("0.0.0.0", 0)))?;
     let port = l.local_addr()?.port();
+    sweep_partials(&dir);
     thread::spawn(move || {
         for s in l.incoming().flatten() {
-            let (tx, dir, grants) = (tx.clone(), dir.clone(), grants.clone());
+            let (tx, dir, grants, policy) = (tx.clone(), dir.clone(), grants.clone(), policy.clone());
             thread::spawn(move || {
-                let _ = recv(s, &tx, &dir, &grants);
+                let _ = recv(s, &tx, &dir, &grants, &policy);
             });
         }
     });
     Ok(port)
 }
 
+fn sweep_partials(dir: &Path) {
+    let old = Duration::from_secs(7 * 24 * 3600);
+    for e in fs::read_dir(dir.join(PARTIAL)).into_iter().flatten().flatten() {
+        if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|a| a > old)) {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
 fn bad() -> io::Error {
     io::ErrorKind::InvalidData.into()
 }
 
-fn recv(s: TcpStream, tx: &Sender<Msg>, dir: &Path, grants: &Grants) -> io::Result<()> {
+fn eof(why: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, why.to_string())
+}
+
+struct HashRead<'a, R> {
+    r: R,
+    h: &'a mut blake3::Hasher,
+}
+
+impl<R: Read> Read for HashRead<'_, R> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let n = self.r.read(b)?;
+        self.h.update(&b[..n]);
+        Ok(n)
+    }
+}
+
+fn recv(s: TcpStream, tx: &Sender<Msg>, dir: &Path, grants: &Grants, policy: &Policy) -> io::Result<()> {
     let id = next_id();
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut r = BufReader::new(s);
+    let sec = secure::handshake(s, &policy.key, false)?;
+    let uid = sec.remote;
+    let mut r = BufReader::new(sec);
     let mut line = String::new();
     (&mut r).take(4096).read_line(&mut line)?;
-    let f: Vec<&str> = line.trim_end().split('\t').collect();
-    // 6º campo (opcional): tipo MIME do clipboard; sem ele, é texto
-    let (kind, size, from, raw, mime) = match f.as_slice() {
-        &["PDROP1", k, s, f, r] => (k, s, f, r, clip::TEXT),
-        &["PDROP1", k, s, f, r, m] if !m.is_empty() && m.len() < 128 => (k, s, f, r, m),
-        _ => return Err(bad()),
-    };
+    let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+    let &["PDROP3", kind, size, from, raw, extra] = f.as_slice() else { return Err(bad()) };
     let kind = kind.chars().next().filter(|k| "ftcb".contains(*k)).ok_or_else(bad)?;
-    let (text, clip) = (kind != 'f', matches!(kind, 'c' | 'b'));
+    let clip = matches!(kind, 'c' | 'b');
     let size = size.parse::<u64>().map_err(|_| bad())?;
     if (kind == 't' && size > MAX_TEXT) || (clip && size > clip::MAX) {
         return Err(bad());
     }
-    let mime = mime.to_string();
+    let count = if kind == 'f' { extra.parse::<usize>().ok().filter(|n| (1..=MAX_FILES).contains(n)).ok_or_else(bad)? } else { 0 };
+    let mime = if extra.is_empty() || extra.len() >= 128 { clip::TEXT } else { extra }.to_string();
     if clip && !clip::available() {
         r.get_mut().write_all(b"N")?;
         return Ok(());
     }
-    let name = match kind {
-        'f' => safe_name(raw),
+    let name: String = match kind {
+        'f' => raw.chars().filter(|c| !c.is_control()).take(80).collect(),
         't' => "mensagem".to_string(),
         _ => "clipboard".to_string(),
     };
+    let name = if name.is_empty() { "arquivo".to_string() } else { name };
     let note = if clip { raw.chars().filter(|c| !c.is_control()).take(60).collect() } else { String::new() };
-    let ip = r.get_ref().peer_addr()?.ip();
-    let mut t = Transfer { id, peer: clean(from), label: name.clone(), size, done: 0, up: false, state: State::Waiting, kind, note };
-    // ponte já permitida nesta sessão: as cópias seguintes entram sem perguntar
-    let granted = kind == 'b' && grants.lock().unwrap().contains_key(&ip);
-    let ok = granted || {
+    let t_peer = clean(from);
+    let mut t = Transfer { id, peer: t_peer.clone(), label: name, size, done: 0, up: false, state: State::Waiting, kind, note, src: String::new(), uid };
+    let granted = kind == 'b' && grants.lock().unwrap().contains_key(&uid);
+    let auto = kind == 't' && policy.trust.lock().unwrap().contains_key(&uid);
+    let ok = granted || auto || {
         let (rtx, rrx) = channel();
         tx.send(Msg::Ask(t.clone(), rtx)).ok();
         rrx.recv().unwrap_or(false)
     };
     if ok && kind == 'b' && !granted {
-        grants.lock().unwrap().insert(ip, t.peer.clone());
+        grants.lock().unwrap().insert(uid, t.peer.clone());
     }
     r.get_mut().write_all(if ok { b"Y" } else { b"N" })?;
     if !ok {
         return Ok(());
     }
-    r.get_ref().set_read_timeout(Some(Duration::from_secs(30)))?;
+    if auto {
+        tx.send(Msg::Auto(t.clone())).ok();
+    }
+    r.get_ref().tcp().set_read_timeout(Some(Duration::from_secs(30)))?;
     t.state = State::Active;
     tx.send(Msg::Start(t)).ok();
     let res = (|| -> io::Result<String> {
-        let mut src = (&mut r).take(size);
-        if text {
-            let mut buf = Vec::with_capacity(size as usize);
-            pump(&mut src, &mut buf, id, size, tx)?;
-            if clip {
-                let c = clip::Clip { mime, data: buf };
-                clip::set(&c)?;
-                return Ok(format!("no clipboard · {}", preview(&c)));
-            }
-            return Ok(String::from_utf8_lossy(&buf).into_owned());
+        if kind == 'f' {
+            return recv_files(&mut r, dir, &policy.routes, &t_peer, uid, count, size, id, tx);
         }
-        let (path, mut f) = create_unique(dir, &name)?;
-        match pump(&mut src, &mut f, id, size, tx) {
-            Ok(()) => Ok(path.display().to_string()),
-            Err(e) => {
-                let _ = fs::remove_file(&path);
-                Err(e)
-            }
+        let mut buf = Vec::with_capacity(size as usize);
+        if pump(&mut (&mut r).take(size), &mut buf, id, 0, size, tx)? != size {
+            return Err(eof("conexão interrompida"));
         }
+        if clip {
+            let c = clip::Clip { mime, data: buf };
+            tx.send(Msg::Clip(t_peer.clone(), c.clone())).ok();
+            clip::set(&c)?;
+            return Ok(format!("no clipboard · {}", preview(&c)));
+        }
+        Ok(String::from_utf8_lossy(&buf).into_owned())
     })();
     tx.send(Msg::End(id, res.map_err(|e| e.to_string()))).ok();
     Ok(())
 }
 
-/// Nome vindo da rede nunca é confiável: só o último componente, sem controles.
-fn safe_name(s: &str) -> String {
-    let n = Path::new(s).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let n: String = n.chars().filter(|c| !c.is_control()).collect();
-    if n.is_empty() { "arquivo".into() } else { n }
+#[allow(clippy::too_many_arguments)]
+fn recv_files(r: &mut BufReader<Secure>, dir: &Path, routes: &[(String, PathBuf)], from: &str, uid: u128, n: usize, total: u64, id: u64, tx: &Sender<Msg>) -> io::Result<String> {
+    let parts = dir.join(PARTIAL);
+    fs::create_dir_all(&parts)?;
+    let (mut roots, mut outs, mut done): (HashMap<String, PathBuf>, Vec<PathBuf>, u64) = Default::default();
+    for _ in 0..n {
+        let mut line = String::new();
+        if (&mut *r).take(4096).read_line(&mut line)? == 0 {
+            return Err(eof("conexão interrompida"));
+        }
+        let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+        let &[rel, size, mtime] = f.as_slice() else { return Err(bad()) };
+        let size = size.parse::<u64>().map_err(|_| bad())?;
+        let comps = rel_components(rel).ok_or_else(bad)?;
+        if done.saturating_add(size) > total {
+            return Err(bad());
+        }
+        let part = parts.join(part_name(uid, rel, size, mtime));
+        let _lock = PartLock::take(&part)?;
+        let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        let off = if have < size { have } else { 0 };
+        writeln!(r.get_mut(), "{off}")?;
+        let mut h = blake3::Hasher::new();
+        let mut file = if off > 0 {
+            let mut f = OpenOptions::new().read(true).append(true).open(&part)?;
+            io::copy(&mut (&mut f).take(off), &mut h)?;
+            f
+        } else {
+            File::create(&part)?
+        };
+        let want = size - off;
+        let got = pump(&mut HashRead { r: (&mut *r).take(want), h: &mut h }, &mut file, id, done + off, total, tx)?;
+        if got != want {
+            return Err(eof("conexão interrompida"));
+        }
+        let mut theirs = String::new();
+        (&mut *r).take(128).read_line(&mut theirs)?;
+        if theirs.trim() != h.finalize().to_hex().as_str() {
+            let _ = fs::remove_file(&part);
+            r.get_mut().write_all(b"E\n")?;
+            return Err(io::Error::other(format!("{rel}: arquivo corrompido na transferência")));
+        }
+        drop(file);
+        let dest = place(dir, routes, from, &mut roots, &mut outs, &comps)?;
+        move_file(&part, &dest)?;
+        r.get_mut().write_all(b"K\n")?;
+        done += size;
+    }
+    Ok(outs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"))
+}
+
+static BUSY: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct PartLock(PathBuf);
+
+impl PartLock {
+    fn take(p: &Path) -> io::Result<Self> {
+        let mut g = BUSY.lock().unwrap();
+        if g.iter().any(|b| b == p) {
+            return Err(io::Error::other("esse arquivo já está sendo recebido em outra transferência"));
+        }
+        g.push(p.to_path_buf());
+        Ok(Self(p.to_path_buf()))
+    }
+}
+
+impl Drop for PartLock {
+    fn drop(&mut self) {
+        BUSY.lock().unwrap().retain(|b| *b != self.0);
+    }
+}
+
+fn part_name(uid: u128, rel: &str, size: u64, mtime: &str) -> String {
+    format!("{}.part", &blake3::hash(format!("{uid:x}\0{rel}\0{size}\0{mtime}").as_bytes()).to_hex()[..32])
+}
+
+fn rel_components(rel: &str) -> Option<Vec<String>> {
+    let v: Vec<String> = rel.split('/').map(|c| c.chars().filter(|c| !c.is_control() && *c != '\\').collect()).collect();
+    (!v.is_empty() && v.len() <= 32 && v.iter().all(|c| !matches!(c.as_str(), "" | "." | ".."))).then_some(v)
+}
+
+fn place(dir: &Path, routes: &[(String, PathBuf)], from: &str, roots: &mut HashMap<String, PathBuf>, outs: &mut Vec<PathBuf>, comps: &[String]) -> io::Result<PathBuf> {
+    if let [only] = comps {
+        let (p, _) = create_unique(&route(routes, dir, from, Some(only)), only)?;
+        outs.push(p.clone());
+        return Ok(p);
+    }
+    if !roots.contains_key(&comps[0]) {
+        let root = create_unique_dir(&route(routes, dir, from, None), &comps[0])?;
+        outs.push(root.clone());
+        roots.insert(comps[0].clone(), root);
+    }
+    let mut p = roots[&comps[0]].clone();
+    p.extend(&comps[1..]);
+    fs::create_dir_all(p.parent().unwrap())?;
+    Ok(p)
+}
+
+fn route(routes: &[(String, PathBuf)], dir: &Path, from: &str, file: Option<&str>) -> PathBuf {
+    let ext = file.and_then(|f| Path::new(f).extension()).map(|e| e.to_string_lossy().to_lowercase());
+    let types: &[(&str, &[&str])] = &[
+        ("imagem", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "avif", "tiff"]),
+        ("video", &["mp4", "mkv", "mov", "webm", "avi", "m4v"]),
+        ("audio", &["mp3", "flac", "wav", "ogg", "m4a", "opus", "aac"]),
+        ("documento", &["pdf", "doc", "docx", "odt", "txt", "md", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "csv", "epub"]),
+        ("compactado", &["zip", "tar", "gz", "xz", "bz2", "7z", "rar", "zst"]),
+    ];
+    for (rule, to) in routes {
+        let hit = match rule.split_once(':') {
+            Some(("de", n)) => n.trim().eq_ignore_ascii_case(from),
+            Some(("ext", e)) => ext.as_deref() == Some(e.trim().trim_start_matches('.').to_lowercase().as_str()),
+            Some(("tipo", t)) => types.iter().any(|(n, es)| *n == t.trim().to_lowercase() && ext.as_deref().is_some_and(|e| es.contains(&e))),
+            _ => false,
+        };
+        if hit {
+            return to.clone();
+        }
+    }
+    dir.to_path_buf()
+}
+
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to).or_else(|_| fs::copy(from, to).and_then(|_| fs::remove_file(from)))
+}
+
+fn unique_name(name: &str, i: u32, dir_like: bool) -> String {
+    if i == 0 {
+        return name.to_string();
+    }
+    let p = Path::new(name);
+    let (stem, ext) = if dir_like { (name.to_string(), String::new()) } else { (p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()) };
+    format!("{stem} ({i}){ext}")
 }
 
 fn create_unique(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
     fs::create_dir_all(dir)?;
-    let p = Path::new(name);
-    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     for i in 0.. {
-        let path = dir.join(if i == 0 { name.to_string() } else { format!("{stem} ({i}){ext}") });
+        let path = dir.join(unique_name(name, i, false));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(f) => return Ok((path, f)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -292,7 +464,20 @@ fn create_unique(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
     unreachable!()
 }
 
-fn pump<R: Read + ?Sized, W: Write + ?Sized>(r: &mut R, w: &mut W, id: u64, size: u64, tx: &Sender<Msg>) -> io::Result<()> {
+fn create_unique_dir(dir: &Path, name: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    for i in 0.. {
+        let path = dir.join(unique_name(name, i, true));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+fn pump<R: Read + ?Sized, W: Write + ?Sized>(r: &mut R, w: &mut W, id: u64, base: u64, total: u64, tx: &Sender<Msg>) -> io::Result<u64> {
     let mut buf = vec![0u8; 1 << 16];
     let (mut done, mut last) = (0u64, Instant::now());
     loop {
@@ -303,41 +488,59 @@ fn pump<R: Read + ?Sized, W: Write + ?Sized>(r: &mut R, w: &mut W, id: u64, size
         w.write_all(&buf[..n])?;
         done += n as u64;
         if last.elapsed() > Duration::from_millis(50) {
-            tx.send(Msg::Progress(id, done)).ok();
+            tx.send(Msg::Progress(id, (base + done).min(total))).ok();
             last = Instant::now();
         }
     }
-    if done != size {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "conexão interrompida"));
-    }
-    tx.send(Msg::Progress(id, done)).ok();
-    Ok(())
+    tx.send(Msg::Progress(id, (base + done).min(total))).ok();
+    Ok(done)
 }
 
-// ---------- enviar ----------
+struct Entry {
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    mtime: u64,
+}
 
-/// `input` é um caminho de arquivo (aceita ~, aspas, file://) ou, se não existir, texto livre.
-pub fn send(to: Peer, me: String, input: String, tx: Sender<Msg>) {
+enum Job {
+    Text(Vec<u8>),
+    Files(String, Vec<Entry>),
+}
+
+pub fn send(to: Peer, me: Who, inputs: Vec<String>, tx: Sender<Msg>) {
     let id = next_id();
     thread::spawn(move || {
-        let mut t = Transfer { id, peer: to.name.clone(), label: String::new(), size: 0, done: 0, up: true, state: State::Waiting, kind: 'f', note: String::new() };
-        match prepare(&input) {
+        let mut t = Transfer { id, peer: to.name.clone(), label: String::new(), size: 0, done: 0, up: true, state: State::Waiting, kind: 'f', note: String::new(), src: inputs.join("\n"), uid: to.uid };
+        match prepare(&inputs) {
             Err(e) => {
-                t.label = input.trim().chars().take(40).collect();
+                t.label = inputs.join(" ").trim().chars().take(40).collect();
                 t.state = State::Failed(e.to_string());
                 tx.send(Msg::Start(t)).ok();
             }
-            Ok((kind, name, size, mut src)) => {
-                (t.label, t.size, t.kind) = (name.clone(), size, kind);
-                tx.send(Msg::Start(t)).ok();
-                let r = go(id, &to, &me, kind, &name, None, size, &mut *src, &tx);
-                tx.send(Msg::End(id, r.map_err(|e| e.to_string()))).ok();
+            Ok(job) => {
+                let (kind, size) = match &job {
+                    Job::Text(b) => ('t', b.len() as u64),
+                    Job::Files(label, es) => {
+                        t.label = label.clone();
+                        ('f', es.iter().map(|e| e.size).sum())
+                    }
+                };
+                if kind == 't' {
+                    t.label = "mensagem".into();
+                }
+                (t.size, t.kind) = (size, kind);
+                tx.send(Msg::Start(t.clone())).ok();
+                let r = match job {
+                    Job::Text(b) => open(&to, &me, 't', size, "mensagem", "").and_then(|mut s| pump(&mut Cursor::new(b), &mut s, id, 0, size, &tx).map(|_| ())),
+                    Job::Files(label, es) => open(&to, &me, 'f', size, &label, &es.len().to_string()).and_then(|s| send_files(s, &es, id, size, &tx)),
+                };
+                tx.send(Msg::End(id, r.map(|_| "enviado".to_string()).map_err(|e| e.to_string()))).ok();
             }
         }
     });
 }
 
-/// Resumo de uma linha do que está no clipboard: começo do texto, ou tipo e tamanho.
 pub fn preview(c: &clip::Clip) -> String {
     if c.is_text() {
         String::from_utf8_lossy(&c.data[..c.data.len().min(512)]).chars().map(|ch| if ch.is_control() { ' ' } else { ch }).take(60).collect()
@@ -346,25 +549,22 @@ pub fn preview(c: &clip::Clip) -> String {
     }
 }
 
-/// Envia o conteúdo inteiro do clipboard, com o tipo, ao clipboard do peer (kind 'c' uma vez, 'b' ponte). Bloqueia; emite Start/End.
-pub fn push_clip(to: &Peer, me: &str, c: &clip::Clip, kind: char, tx: &Sender<Msg>) -> io::Result<()> {
+pub fn push_clip(to: &Peer, me: &Who, c: &clip::Clip, kind: char, tx: &Sender<Msg>) -> io::Result<()> {
     let id = next_id();
     let note = preview(c);
     let size = c.data.len() as u64;
-    let t = Transfer { id, peer: to.name.clone(), label: "clipboard".into(), size, done: 0, up: true, state: State::Waiting, kind, note: note.clone() };
+    let t = Transfer { id, peer: to.name.clone(), label: "clipboard".into(), size, done: 0, up: true, state: State::Waiting, kind, note: note.clone(), src: note.clone(), uid: to.uid };
     tx.send(Msg::Start(t)).ok();
     let r = if size > clip::MAX {
         Err(io::Error::other("clipboard grande demais"))
     } else {
-        go(id, to, me, kind, &note, Some(&c.mime), size, &mut Cursor::new(&c.data), tx)
+        open(to, me, kind, size, &note, &c.mime).and_then(|mut s| pump(&mut Cursor::new(&c.data), &mut s, id, 0, size, tx).map(|_| ()))
     };
     tx.send(Msg::End(id, r.as_ref().map(|_| note.clone()).map_err(|e| e.to_string()))).ok();
-    r.map(|_| ())
+    r
 }
 
-/// Ponte contínua: a cada cópia nova, empurra para o peer. Para sozinha se o peer recusar ou cair.
-// ponytail: confere o clipboard a cada 400ms (processo por leitura); eventos nativos se pesar.
-pub fn bridge(to: Peer, me: String, tx: Sender<Msg>, stop: Arc<AtomicBool>) {
+pub fn bridge(to: Peer, me: Who, tx: Sender<Msg>, stop: Arc<AtomicBool>) {
     thread::spawn(move || {
         clip::mark_current();
         while !stop.load(Ordering::Relaxed) {
@@ -381,44 +581,97 @@ pub fn bridge(to: Peer, me: String, tx: Sender<Msg>, stop: Arc<AtomicBool>) {
     });
 }
 
-type Prepared = (char, String, u64, Box<dyn Read + Send>);
-
-fn prepare(input: &str) -> io::Result<Prepared> {
-    let path = clean_path(input);
-    if path.is_file() {
-        let f = File::open(&path)?;
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        Ok(('f', name, f.metadata()?.len(), Box::new(f)))
-    } else if path.is_dir() {
-        Err(io::Error::other("pastas ainda não são suportadas"))
-    } else {
-        let b = input.trim().as_bytes().to_vec();
-        if b.len() as u64 > MAX_TEXT {
-            return Err(io::Error::other("texto grande demais"));
+fn prepare(inputs: &[String]) -> io::Result<Job> {
+    let paths: Vec<PathBuf> = inputs.iter().map(|i| clean_path(i)).collect();
+    if let ([input], [path]) = (inputs, paths.as_slice()) {
+        if !path.exists() {
+            let b = input.trim().as_bytes().to_vec();
+            if b.len() as u64 > MAX_TEXT {
+                return Err(io::Error::other("texto grande demais"));
+            }
+            return Ok(Job::Text(b));
         }
-        Ok(('t', "mensagem".into(), b.len() as u64, Box::new(Cursor::new(b))))
     }
+    let mut es = vec![];
+    for p in &paths {
+        let p = fs::canonicalize(p).map_err(|_| io::Error::other(format!("não achei {}", p.display())))?;
+        let name = p.file_name().map(|n| n.to_string_lossy().replace(|c: char| c.is_control() || c == '/', "_")).ok_or_else(|| io::Error::other("caminho sem nome"))?;
+        walk(&p, name, &mut es)?;
+    }
+    if es.is_empty() {
+        return Err(io::Error::other("nada para enviar (pasta vazia?)"));
+    }
+    let label = match (paths.as_slice(), es.as_slice()) {
+        ([p], [e]) if p.is_file() => e.rel.clone(),
+        ([p], es) if p.is_dir() => format!("{}/ · {} arquivos", es[0].rel.split('/').next().unwrap_or(""), es.len()),
+        _ => format!("{} arquivos", es.len()),
+    };
+    Ok(Job::Files(label, es))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn go(id: u64, to: &Peer, me: &str, kind: char, name: &str, mime: Option<&str>, size: u64, src: &mut dyn Read, tx: &Sender<Msg>) -> io::Result<String> {
-    // sem resposta quase sempre é firewall de um dos lados; o erro diz o que conferir
-    let mut s = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5))
-        .map_err(|e| io::Error::new(e.kind(), format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})")))?;
-    s.set_read_timeout(Some(Duration::from_secs(60)))?;
-    s.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let name: String = name.chars().filter(|c| !c.is_control()).collect();
-    match mime.filter(|m| !m.contains(['\t', '\n'])) {
-        Some(m) => writeln!(s, "PDROP1\t{kind}\t{size}\t{me}\t{name}\t{m}")?,
-        None => writeln!(s, "PDROP1\t{kind}\t{size}\t{me}\t{name}")?,
+fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
+    let m = fs::symlink_metadata(p)?;
+    if m.is_dir() {
+        for e in fs::read_dir(p)? {
+            let e = e?;
+            let n = e.file_name().to_string_lossy().replace(|c: char| c.is_control() || c == '/', "_");
+            walk(&e.path(), format!("{rel}/{n}"), out)?;
+        }
+    } else if m.is_file() {
+        if out.len() >= MAX_FILES {
+            return Err(io::Error::other("arquivos demais (limite de 100 mil por envio)"));
+        }
+        let mtime = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        out.push(Entry { rel, path: p.to_path_buf(), size: m.len(), mtime });
     }
+    Ok(())
+}
+
+fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
+    let tcp = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5))
+        .map_err(|e| io::Error::new(e.kind(), format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})")))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let mut s = secure::handshake(tcp, &me.key, true)?;
+    if s.remote != to.uid {
+        return Err(io::Error::other("a identidade desse aparelho mudou ou não confere: recusei por segurança"));
+    }
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+    writeln!(s, "PDROP3\t{kind}\t{size}\t{}\t{}\t{}", clean(&me.name), clean(name), clean(extra))?;
     let mut ans = [0u8; 1];
     s.read_exact(&mut ans)?;
     if ans[0] != b'Y' {
         return Err(io::Error::other("recusado"));
     }
-    pump(src, &mut s, id, size, tx)?;
-    Ok("enviado".into())
+    Ok(s)
+}
+
+fn send_files(s: Secure, es: &[Entry], id: u64, total: u64, tx: &Sender<Msg>) -> io::Result<()> {
+    let mut rd = BufReader::new(s);
+    let mut line = String::new();
+    let mut done = 0u64;
+    for e in es {
+        writeln!(rd.get_mut(), "{}\t{}\t{}", e.rel, e.size, e.mtime)?;
+        line.clear();
+        rd.read_line(&mut line)?;
+        let off = line.trim().parse::<u64>().ok().filter(|&o| o <= e.size).ok_or_else(bad)?;
+        let mut f = File::open(&e.path)?;
+        let mut h = blake3::Hasher::new();
+        io::copy(&mut (&mut f).take(off), &mut h)?;
+        let want = e.size - off;
+        let sent = pump(&mut HashRead { r: (&mut f).take(want), h: &mut h }, rd.get_mut(), id, done + off, total, tx)?;
+        if sent != want {
+            return Err(io::Error::other(format!("{} mudou durante o envio", e.rel)));
+        }
+        writeln!(rd.get_mut(), "{}", h.finalize().to_hex())?;
+        line.clear();
+        rd.read_line(&mut line)?;
+        if line.trim() != "K" {
+            return Err(io::Error::other(format!("{}: o destinatário recebeu corrompido", e.rel)));
+        }
+        done += e.size;
+    }
+    Ok(())
 }
 
 fn clean_path(s: &str) -> PathBuf {
@@ -434,32 +687,98 @@ fn clean_path(s: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn loopback_file_and_text() {
-        let dir = std::env::temp_dir().join(format!("pdrop-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("src.txt");
-        fs::write(&src, "olá").unwrap();
-        let (tx, rx) = channel();
-        let port = listen(dir.clone(), tx.clone(), Grants::default()).unwrap();
-        let peer = Peer { id: 1, name: "t".into(), addr: ([127, 0, 0, 1], port).into(), seen: Instant::now(), born: Instant::now(), rtt: None, color: 0 };
-        send(peer.clone(), "eu".into(), src.display().to_string(), tx.clone());
-        send(peer, "eu".into(), "oi mundo".into(), tx);
-        let (mut ends, mut text) = (0, false);
-        while ends < 4 {
+    fn peer(port: u16, uid: u128) -> Peer {
+        Peer { id: 1, name: "t".into(), addr: ([127, 0, 0, 1], port).into(), seen: Instant::now(), born: Instant::now(), rtt: None, color: 0, uid }
+    }
+
+    fn drain(rx: &std::sync::mpsc::Receiver<Msg>, n: usize) -> Vec<Result<String, String>> {
+        let mut out = vec![];
+        while out.len() < 2 * n {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
                 Msg::Ask(_, r) => r.send(true).unwrap(),
-                Msg::End(_, r) => {
-                    ends += 1;
-                    text |= r.unwrap() == "oi mundo";
-                }
+                Msg::End(_, r) => out.push(r),
                 _ => {}
             }
         }
-        assert!(text);
-        // o destino é a mesma pasta da origem: prova também o "(1)" anti-sobrescrita
+        out
+    }
+
+    #[test]
+    fn loopback_file_text_folder_resume() {
+        let dir = std::env::temp_dir().join(format!("pdrop-test-{}", std::process::id()));
+        let tree = dir.join("tree");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(dir.join("src.txt"), "olá").unwrap();
+        fs::write(tree.join("a.txt"), "aa").unwrap();
+        fs::write(tree.join("sub/b.txt"), "bb").unwrap();
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(dir.join("big.bin"), &big).unwrap();
+        let (tx, rx) = channel();
+        let ((rk, rp), (sk, sp)) = (secure::generate(), secure::generate());
+        let policy = Arc::new(Policy { key: rk, routes: vec![("ext:bin".into(), dir.join("bins"))], ..Default::default() });
+        let port = listen(dir.clone(), tx.clone(), Grants::default(), policy.clone()).unwrap();
+        let me = Who { name: "eu".into(), key: sk };
+        let (ruid, suid) = (secure::id_of(&rp), secure::id_of(&sp));
+        let s = |v: &[&str]| send(peer(port, ruid), me.clone(), v.iter().map(|s| s.to_string()).collect(), tx.clone());
+
+        s(&[&dir.join("src.txt").display().to_string()]);
+        s(&["oi mundo"]);
+        s(&[&tree.display().to_string()]);
+        let mut res = drain(&rx, 3);
+        s(&[&dir.join("src.txt").display().to_string(), &dir.join("big.bin").display().to_string()]);
+        res.extend(drain(&rx, 1));
+        assert!(res.iter().all(|r| r.is_ok()), "{res:?}");
+        assert!(res.iter().any(|r| r.as_deref() == Ok("oi mundo")));
         assert_eq!(fs::read_to_string(dir.join("src (1).txt")).unwrap(), "olá");
-        assert_eq!(safe_name("../../etc/passwd"), "passwd");
+        assert_eq!(fs::read_to_string(dir.join("src (2).txt")).unwrap(), "olá");
+        assert_eq!(fs::read_to_string(dir.join("tree (1)/sub/b.txt")).unwrap(), "bb");
+        assert_eq!(fs::read(dir.join("bins/big.bin")).unwrap(), big);
+        assert!(fs::read_dir(dir.join(PARTIAL)).unwrap().next().is_none(), "sobrou pedaço");
+
+        let m = fs::metadata(dir.join("big.bin")).unwrap();
+        let mtime = m.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs().to_string();
+        let part = dir.join(PARTIAL).join(part_name(suid, "big.bin", m.len(), &mtime));
+        fs::write(&part, vec![0u8; 50_000]).unwrap();
+        s(&[&dir.join("big.bin").display().to_string()]);
+        let res = drain(&rx, 1);
+        assert!(res.iter().all(|r| r.is_err()) && res.iter().any(|r| r.as_ref().unwrap_err().contains("corromp")), "{res:?}");
+        assert!(!part.exists());
+        fs::write(&part, &big[..50_000]).unwrap();
+        s(&[&dir.join("big.bin").display().to_string()]);
+        assert!(drain(&rx, 1).iter().all(|r| r.is_ok()));
+        assert_eq!(fs::read(dir.join("bins/big (1).bin")).unwrap(), big);
+
+        send(peer(port, ruid ^ 1), me.clone(), vec!["oi".into()], tx.clone());
+        loop {
+            if let Msg::End(_, r) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                assert!(r.unwrap_err().contains("identidade"));
+                break;
+            }
+        }
+
+        assert_eq!(rel_components("../x"), None);
+        assert_eq!(rel_components("a//b"), None);
+        assert_eq!(rel_components("a/b").unwrap(), ["a", "b"]);
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn routing() {
+        let r = vec![("de:Ana".to_string(), PathBuf::from("/ana")), ("tipo:imagem".into(), "/pics".into()), ("ext:PDF".into(), "/docs".into())];
+        let d = Path::new("/dl");
+        assert_eq!(route(&r, d, "ana", Some("a.png")), Path::new("/ana"));
+        assert_eq!(route(&r, d, "bob", Some("A.JPG")), Path::new("/pics"));
+        assert_eq!(route(&r, d, "bob", Some("x.pdf")), Path::new("/docs"));
+        assert_eq!(route(&r, d, "bob", Some("x.rs")), d);
+        assert_eq!(route(&r, d, "bob", None), d);
+    }
+
+    #[test]
+    fn visibility_rule() {
+        assert!(shown(VIS_ALL, VIS_ALL, false));
+        assert!(!shown(VIS_TRUSTED, VIS_ALL, false));
+        assert!(shown(VIS_TRUSTED, VIS_ALL, true));
+        assert!(!shown(VIS_ALL, VIS_TRUSTED, false));
+        assert!(shown(VIS_ALL, VIS_TRUSTED, true));
     }
 }

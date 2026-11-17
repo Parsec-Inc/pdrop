@@ -11,7 +11,6 @@ from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from PIL import Image
 
-# mesma ordem dos glifos na folha
 CHARS = [chr(c) for c in range(32, 127)] + list("áàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÇ…›·↑↓←→")
 CW, CH, BASE, U = 6, 11, 9, 100
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +30,7 @@ for k, ch in enumerate(CHARS):
             if im.getpixel((ox + x, oy + y))[3] < 128:
                 x += 1
                 continue
-            x0 = x  # junta a sequência horizontal num retângulo só
+            x0 = x
             while x < CW and im.getpixel((ox + x, oy + y))[3] >= 128:
                 x += 1
             right = max(right, x - 1)

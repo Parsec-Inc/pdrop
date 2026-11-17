@@ -1,16 +1,12 @@
-//! Clipboard via ferramentas do sistema (sem dependência): wl-clipboard, xclip/xsel, pbcopy/pbpaste, PowerShell (Windows).
-//! Com wl-clipboard e xclip o conteúdo vai com o tipo (texto, imagem…); nas outras, só texto.
 use std::{
     io::{self, Read, Write},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
 };
 
-/// Maior conteúdo de clipboard aceito (fica todo na memória dos dois lados).
 pub const MAX: u64 = 64 << 20;
 pub const TEXT: &str = "text/plain;charset=utf-8";
 
-/// Conteúdo do clipboard com o tipo MIME.
 #[derive(Clone, PartialEq)]
 pub struct Clip {
     pub mime: String,
@@ -59,17 +55,14 @@ pub fn available() -> bool {
     tool().is_some()
 }
 
-/// Última coisa que o pdrop viu ou escreveu no clipboard: evita reenviar o que acabou de chegar (eco).
 static LAST: Mutex<Option<Clip>> = Mutex::new(None);
 
-/// Windows: sem isso cada leitura do clipboard pisca uma janela de console.
 pub fn quiet(c: &mut Command) -> &mut Command {
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(c, 0x0800_0000);
     c
 }
 
-/// Roda e lê a saída inteira, até MAX; maior que isso é recusado (o processo é morto, não fica preso no pipe).
 fn read(cmd: &[&str]) -> Option<Vec<u8>> {
     let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..])).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let mut buf = Vec::new();
@@ -82,7 +75,6 @@ fn read(cmd: &[&str]) -> Option<Vec<u8>> {
     child.wait().ok()?.success().then_some(buf)
 }
 
-/// Entre os tipos oferecidos, o que melhor representa o conteúdo: imagem se houver, senão texto.
 fn pick(types: &str) -> Option<String> {
     let ts: Vec<&str> = types.lines().map(str::trim).filter(|t| !t.is_empty()).collect();
     let has = |t: &str| ts.contains(&t);
@@ -116,7 +108,6 @@ pub fn set(c: &Clip) -> io::Result<()> {
     let t = tool().ok_or_else(|| io::Error::other("sem ferramenta de clipboard"))?;
     let text = c.is_text();
     let cmd: Vec<&str> = match t {
-        // texto sem -t: wl-copy/xclip oferecem todos os tipos de texto, e qualquer app cola
         Tool::Wl if text => vec!["wl-copy"],
         Tool::Wl => vec!["wl-copy", "-t", &c.mime],
         Tool::Xclip if text => vec!["xclip", "-selection", "clipboard", "-i"],
@@ -128,19 +119,17 @@ pub fn set(c: &Clip) -> io::Result<()> {
     };
     *LAST.lock().unwrap() = Some(c.clone());
     let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..])).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-    child.stdin.take().unwrap().write_all(&c.data)?; // o stdin fecha aqui: EOF para a ferramenta
+    child.stdin.take().unwrap().write_all(&c.data)?;
     if !child.wait()?.success() {
         return Err(io::Error::other(format!("{} falhou", cmd[0])));
     }
     Ok(())
 }
 
-/// Marca o conteúdo atual como "já visto": a ponte só envia o que for copiado depois de ligada.
 pub fn mark_current() {
     *LAST.lock().unwrap() = get();
 }
 
-/// true se `cur` é novo (e passa a ser o último visto).
 pub fn changed(cur: &Clip) -> bool {
     let mut l = LAST.lock().unwrap();
     (l.as_ref() != Some(cur)).then(|| *l = Some(cur.clone())).is_some()
