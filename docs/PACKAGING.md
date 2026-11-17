@@ -19,17 +19,18 @@ do Homebrew compila o código-fonte na máquina de quem instala (`brew install -
 
 ## Fazer uma release
 
-Não tem passo manual: todo push na `main` roda `.github/workflows/release.yml`.
+Não tem passo manual: todo push na `main` roda `.github/workflows/release.yml`. Os testes não
+rodam de novo aqui: eles já passaram no PR (`ci.yml`, testes e build em Linux, macOS e Windows,
+cancelando o run anterior quando entra um push novo no mesmo PR).
 
-1. **tests**: o `ci.yml` (testes e build em Linux, macOS e Windows).
-2. **bump**: o commitizen (`.cz.toml`) calcula a versão pelos commits desde a última tag
-   (`feat` sobe minor, `fix` sobe patch; com `major_version_zero`, nada vira 1.0 sozinho), troca a
+1. **bump**: o commitizen (`.cz.toml`) calcula a versão pelos commits desde a última tag
+   (`feat` sobe minor, `fix` sobe patch, `!` ou `BREAKING CHANGE` sobe major), troca a
    versão no `Cargo.toml`, `Cargo.lock`, PKGBUILD, `.spec`, `snapcraft.yaml` e na fórmula, escreve o
    `CHANGELOG.md`, cria a tag `vX.Y.Z` e dá push. Sem `feat`/`fix` desde a última tag, para aqui.
-3. **builds**: deb, rpm, Arch, MSI, macOS e snap, todos da tag nova.
-4. **release**: anexa tudo, com `SHA256SUMS` e as notas do CHANGELOG. Só o linux é obrigatório:
+2. **builds**: deb, rpm, Arch, MSI, macOS e snap, todos da tag nova.
+3. **release**: anexa tudo, com `SHA256SUMS` e as notas do CHANGELOG. Só o linux é obrigatório:
    se outra plataforma falhar, a release sai sem ela.
-5. **aur**, **homebrew** e o **snap** na loja: só com as variáveis ligadas (abaixo).
+4. **aur**, **homebrew** e o **snap** na loja: só com as variáveis ligadas (abaixo).
 
 Para forçar uma versão, rode o workflow **release** à mão (*Actions > release > Run workflow*) e
 escolha o incremento. Os commits precisam seguir o Conventional Commits (`feat:`, `fix:`, `ci:`...).
