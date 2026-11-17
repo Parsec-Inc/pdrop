@@ -1,7 +1,11 @@
 name: release
+# PR mergeado na main: testes e builds em paralelo; a tag e a release só saem se tudo passar.
+# O snap é o build mais lento: entra na release (e na Snap Store) depois, quando terminar.
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [main]
+  # manual só a partir da main
   workflow_dispatch:
     inputs:
       increment:
@@ -17,25 +21,30 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # commit da main que o PR gerou (ou o da execução manual)
+  BASE_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+
 jobs:
   tests:
-    if: ${{ !startsWith(github.event.head_commit.message, 'bump:') }}
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.pull_request.merged
     uses: ./.github/workflows/ci.yml
 
+  # Cria o commit e a tag do bump só localmente; os builds recebem os dois num git bundle
+  # e o push só acontece no job release, depois dos testes.
   bump:
-    needs: tests
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.pull_request.merged
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     outputs:
       released: ${{ steps.bump.outputs.released }}
       tag: ${{ steps.bump.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.BASE_SHA }}
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@v6
 
@@ -60,14 +69,12 @@ jobs:
           [ "$status" -eq 0 ] || exit "$status"
           tag="$(git describe --tags --exact-match HEAD)"
           uvx --from commitizen cz changelog "$tag" --dry-run > release-notes.md
-          echo "released=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git bundle create bump.bundle "$BASE_SHA..refs/tags/$tag"
+          { echo "released=true"; echo "tag=$tag"; } >> "$GITHUB_OUTPUT"
 
-      - name: Push version commit and tag
+      - uses: actions/upload-artifact@v4
         if: steps.bump.outputs.released == 'true'
-        env:
-          TAG: ${{ steps.bump.outputs.tag }}
-        run: git push --atomic origin HEAD:main "$TAG"
+        with: { name: bump, path: bump.bundle }
 
       - uses: actions/upload-artifact@v4
         if: steps.bump.outputs.released == 'true'
@@ -79,7 +86,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.bump.outputs.tag }}" }
+        with: { ref: "${{ env.BASE_SHA }}", persist-credentials: false }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -94,7 +103,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.bump.outputs.tag }}" }
+        with: { ref: "${{ env.BASE_SHA }}", persist-credentials: false }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
       - run: ./scripts/package.sh arch
       - uses: actions/upload-artifact@v4
         with: { name: arch, path: dist/* }
@@ -108,7 +119,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.bump.outputs.tag }}" }
+        with: { ref: "${{ env.BASE_SHA }}", persist-credentials: false }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: WiX 3
@@ -125,7 +138,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.bump.outputs.tag }}" }
+        with: { ref: "${{ env.BASE_SHA }}", persist-credentials: false }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/package.sh macos
@@ -136,24 +151,56 @@ jobs:
     needs: bump
     if: needs.bump.outputs.released == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      file: ${{ steps.name.outputs.file }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ needs.bump.outputs.tag }}" }
+        with: { ref: "${{ env.BASE_SHA }}", persist-credentials: false }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
       - uses: snapcore/action-build@v1
         id: build
+      - id: name
+        env: { SNAP_FILE: "${{ steps.build.outputs.snap }}" }
+        run: echo "file=$(basename "$SNAP_FILE")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with: { name: snap, path: "${{ steps.build.outputs.snap }}" }
-      - uses: snapcore/action-publish@v1
-        if: ${{ vars.PUBLISH_SNAP == 'true' }}
-        env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-        with:
-          snap: ${{ steps.build.outputs.snap }}
-          release: edge
 
   release:
-    needs: [bump, linux, arch, windows, macos, snap]
-    if: ${{ !cancelled() && needs.linux.result == 'success' }}
+    needs: [bump, tests, linux, arch, windows, macos]
+    # só com os testes e o linux verdes; os outros builds com falha ficam de fora
+    if: ${{ !cancelled() && needs.tests.result == 'success' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.BASE_SHA }}" }
+      - uses: ./.github/actions/release-checkout
+        with: { version: "${{ needs.bump.outputs.tag }}" }
+      # a main recebe o commit do bump só agora, com tudo testado e compilado
+      - name: Push version commit and tag
+        run: git push --atomic origin "$(git rev-parse "$TAG^{commit}"):refs/heads/main" "refs/tags/$TAG"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{linux,arch,windows,macos,notes}'
+          path: ${{ runner.temp }}/dist
+          merge-multiple: true
+      - name: GitHub release
+        working-directory: ${{ runner.temp }}/dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv release-notes.md ..
+          sha256sum -- * > SHA256SUMS
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --notes-file ../release-notes.md -- *
+
+  # o .snap entra na release quando ficar pronto, e o SHA256SUMS é refeito com ele
+  snap-release:
+    needs: [bump, release, snap]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.snap.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,14 +208,22 @@ jobs:
       TAG: ${{ needs.bump.outputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
-      - name: GitHub release
+        with: { name: snap, path: snap }
+      - name: Anexa à release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mv dist/release-notes.md .
-          (cd dist && sha256sum * > SHA256SUMS)
-          gh release create "$TAG" dist/* -R "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release-notes.md
+          mkdir sums
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p SHA256SUMS -D sums
+          (cd snap && sha256sum -- *) >> sums/SHA256SUMS
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber snap/* sums/SHA256SUMS
+      - uses: snapcore/action-publish@v1
+        if: ${{ vars.PUBLISH_SNAP == 'true' }}
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: snap/${{ needs.snap.outputs.file }}
+          release: edge
 
   aur:
     needs: [bump, release]

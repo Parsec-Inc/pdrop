@@ -1,7 +1,15 @@
 name: ci
+# Todo push fora da main; um push novo na mesma branch cancela o teste anterior.
+# Na release, o release.yml chama este workflow em paralelo com os builds.
 on:
-  pull_request:
+  push:
+    branches-ignore: [main]
   workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -15,7 +23,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --release --locked
