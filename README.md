@@ -24,12 +24,12 @@ Run `pdrop` on two or more machines on the same network and they appear as blips
 
 - **Send files** — type or paste a path (drag-and-drop into the terminal works too; `~`, quotes, and `file://` URLs are cleaned up automatically).
 - **Send text** — anything that isn't an existing file path is sent as a free-form message.
-- **Clipboard share** (`v`) — push your current clipboard text to a peer once.
+- **Clipboard share** (`v`) — push your whole clipboard to a peer once; it lands in their clipboard with the same type (text, or images with `wl-clipboard`/`xclip`).
 - **Clipboard bridge** (`b`) — keep it on and *everything you copy* flows to the peer automatically, like a shared clipboard. The recipient approves once per session; repeat copies arrive without asking.
 - **Live radar** — animated sweeping radar with blips for each peer, colored by their chosen accent, orbiting an ASCII icon, pulsing when the sweep passes. Ping-based RTT places close peers on the inner ring.
 - **Identity** — pick your display color (`c`), ASCII icon (`i`), and name (`r`); all persisted in `~/.config/pdrop` and broadcast so others see them.
 - **Accept/refuse prompts** — incoming transfers ask y/n in-app, plus a terminal bell and a desktop notification (`notify-send` on Linux, `osascript` on macOS) so you notice even when the terminal is in the background.
-- **Safe by construction** — incoming file names are stripped to the last path component, existing files are never overwritten (`photo.jpg`, `photo (1).jpg`, …), failed writes delete the partial file, and text payloads are capped at 1 MiB.
+- **Safe by construction** — incoming file names are stripped to the last path component, existing files are never overwritten (`photo.jpg`, `photo (1).jpg`, …), failed writes delete the partial file, text messages are capped at 1 MiB and clipboard payloads at 64 MiB.
 
 ## Requirements
 
@@ -54,7 +54,20 @@ sudo dnf install wl-clipboard    # or: xclip
 
 ## Install
 
-### From source (recommended)
+Pre-built packages are attached to each [release](https://github.com/Parsec-Inc/pdrop/releases):
+
+| Platform | Install |
+|---|---|
+| Fedora / RHEL | `sudo dnf install ./pdrop-*.rpm` (COPR: `sudo dnf copr enable parsec-inc/pdrop`) |
+| Debian / Ubuntu | `sudo apt install ./pdrop_*.deb` |
+| Arch | `sudo pacman -U pdrop-*.pkg.tar.zst` (AUR: `yay -S pdrop`) |
+| Snap | `sudo snap install pdrop` |
+| macOS | `brew install Parsec-Inc/tap/pdrop` |
+| Windows | run `pdrop-*.msi` |
+
+Maintainers: see [docs/PACKAGING.md](docs/PACKAGING.md). Not every channel above is published yet.
+
+### From source
 
 ```bash
 git clone <this repo>
@@ -104,18 +117,18 @@ With no valid arguments, it prints the usage line. Everything else is done insid
 
 | Key | Action |
 |-----|--------|
-| `←/→`, `h/l`, `Tab` | Select peer |
-| `enter` or `s` | Open the send prompt for the selected peer |
-| *(drag & drop)* | Dropping a file on the terminal pre-fills the send prompt |
-| `v` | Send current clipboard text once |
+| `←/→`, `h/l`, `Tab`/`shift+Tab` | Select peer (or browse the open color/icon picker) |
+| `enter`, `space` or `s` | Open the send prompt for the selected peer (confirms inside a picker) |
+| *(drag & drop)* | Dropping a file on the window sends it to the selected peer |
+| `v` | Send current clipboard once |
 | `b` | Toggle the clipboard bridge to the selected peer |
 | `x` | Cut all clipboard bridges others opened *toward* you |
 | `c` | Pick your accent color (8-color palette, ←→ to browse, `enter` to confirm) |
 | `i` | Pick your radar icon (11 ASCII glyphs, or just the dot) |
 | `r` | Rename yourself (max 32 chars, saved persistently) |
 | `y` / `n` | Accept / refuse an incoming transfer or bridge request |
-| `q`, `esc` | Quit (`esc` cancels the active prompt first) |
-| `ctrl+c` | Quit |
+| `esc` | Cancel the open prompt or picker |
+| `q`, `ctrl+c` | Quit |
 
 The bottom bar shows context-sensitive hints for whatever is happening (prompt open, color picker, pending incoming transfer, …).
 

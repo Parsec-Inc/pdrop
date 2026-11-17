@@ -1,0 +1,29 @@
+name: pdrop
+base: core24
+version: '0.1.0'
+summary: AirDrop-style sharing on your local network
+description: |
+  Run pdrop on two or more machines on the same network and they appear on
+  each other's radar. Select a peer and drop files, text or your clipboard to
+  them. No accounts, no servers, no cloud.
+license: MIT
+grade: stable
+confinement: strict
+
+apps:
+  pdrop:
+    command: bin/pdrop
+    extensions: [gnome]   # traz wayland, x11, opengl e desktop
+    plugs: [network, network-bind, home]
+
+parts:
+  pdrop:
+    plugin: rust
+    rust-channel: stable   # a edição 2024 pede Rust >= 1.85; o do apt do core24 é mais velho
+    source: .
+    stage-packages: [wl-clipboard, xclip, libnotify-bin]
+    override-build: |
+      craftctl default
+      install -Dm644 assets/pdrop.png "$CRAFT_PART_INSTALL/meta/gui/pdrop.png"
+      sed 's|^Icon=.*|Icon=${SNAP}/meta/gui/pdrop.png|; s|^Exec=.*|Exec=pdrop|' assets/pdrop.desktop \
+        > "$CRAFT_PART_INSTALL/meta/gui/pdrop.desktop"

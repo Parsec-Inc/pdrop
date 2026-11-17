@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=pdrop
+Comment=Compartilhe arquivos, texto e clipboard na rede local
+Exec=pdrop
+Icon=pdrop
+Terminal=false
+Categories=Network;FileTransfer;
+StartupWMClass=pdrop

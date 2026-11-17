@@ -1,0 +1,114 @@
+# Publica uma release ao empurrar uma tag vX.Y.Z (a versão do Cargo.toml tem que bater).
+# Os jobs de AUR, Snap Store e Homebrew só rodam se a variável do repositório estiver 'true'
+# (Settings > Secrets and variables > Actions); veja docs/PACKAGING.md.
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  linux: # deb + rpm; ubuntu 22.04 para o binário rodar em glibc mais antiga
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag bate com a versão do Cargo.toml
+        run: test "v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$GITHUB_REF_NAME"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deb cargo-generate-rpm --locked
+      - run: ./scripts/package.sh linux
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: dist/* }
+
+  arch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/package.sh arch
+      - uses: actions/upload-artifact@v4
+        with: { name: arch, path: dist/* }
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: WiX 3
+        run: |
+          [ -d "/c/Program Files (x86)/WiX Toolset v3.14/bin" ] || choco install wixtoolset --no-progress -y
+          echo 'C:\Program Files (x86)\WiX Toolset v3.14\bin' >> "$GITHUB_PATH"
+      - run: ./scripts/package.sh msi
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/* }
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/package.sh macos
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: dist/* }
+
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snapcore/action-build@v1
+        id: build
+      - uses: actions/upload-artifact@v4
+        with: { name: snap, path: "${{ steps.build.outputs.snap }}" }
+      - uses: snapcore/action-publish@v1
+        if: ${{ vars.PUBLISH_SNAP == 'true' }}
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: edge # suba para stable depois de testar
+
+  release:
+    needs: [linux, arch, windows, macos, snap]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  aur:
+    needs: release
+    if: ${{ vars.PUBLISH_AUR == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: pdrop
+          pkgbuild: ./packaging/arch/PKGBUILD
+          updpkgsums: true
+          commit_username: ${{ github.actor }}
+          commit_email: noreply@github.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+  homebrew:
+    needs: release
+    if: ${{ vars.PUBLISH_BREW == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: pdrop
+          homebrew-tap: Parsec-Inc/homebrew-tap
+          download-url: https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

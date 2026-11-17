@@ -1,15 +1,12 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod clip;
 mod net;
 mod ui;
 
 use net::{Grants, Msg, Peer, Peers, State, Transfer};
-use ratatui::crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-};
 use std::{
     collections::VecDeque,
-    io::{self, Write},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -45,6 +42,11 @@ pub struct App {
     pub grants: Grants,
     pub flash: Option<(String, Instant)>,
     pub shared_color: Arc<AtomicU8>,
+    pub rx: Receiver<Msg>,
+    pub tx: Sender<Msg>,
+    pub sp: ui::Sprites,
+    /// pede foco para o campo de texto que acabou de abrir
+    pub focus: bool,
 }
 
 impl App {
@@ -69,15 +71,15 @@ impl App {
         }
     }
 
-    fn clip_once(&mut self, peers: &[Peer], tx: &Sender<Msg>) {
+    fn clip_once(&mut self, peers: &[Peer]) {
         let Some(p) = peers.iter().find(|p| Some(p.id) == self.sel).cloned() else { return };
         if !clip::available() {
             return self.flash(NO_CLIP);
         }
-        match clip::get().filter(|s| !s.is_empty()) {
-            None => self.flash("clipboard vazio"),
+        match clip::get().filter(|c| !c.data.is_empty()) {
+            None => self.flash("clipboard vazio, grande demais (64 MB) ou num formato que não dá para enviar"),
             Some(text) => {
-                let (me, tx) = (self.me.clone(), tx.clone());
+                let (me, tx) = (self.me.clone(), self.tx.clone());
                 std::thread::spawn(move || {
                     let _ = net::push_clip(&p, &me, &text, 'c', &tx);
                 });
@@ -85,7 +87,7 @@ impl App {
         }
     }
 
-    fn toggle_bridge(&mut self, peers: &[Peer], tx: &Sender<Msg>) {
+    fn toggle_bridge(&mut self, peers: &[Peer]) {
         if self.bridge.is_some() {
             self.stop_bridge();
             return self.flash("ponte desligada");
@@ -95,7 +97,7 @@ impl App {
             return self.flash(NO_CLIP);
         }
         let stop = Arc::new(AtomicBool::new(false));
-        net::bridge(p.clone(), self.me.clone(), tx.clone(), stop.clone());
+        net::bridge(p.clone(), self.me.clone(), self.tx.clone(), stop.clone());
         self.flash(format!("ponte ligada: tudo que você copiar vai para {}. Senhas costumam ficar de fora, mas confira.", p.name));
         self.bridge = Some((p.id, p.name, stop));
     }
@@ -146,112 +148,82 @@ impl App {
         }
     }
 
-    /// true = sair
-    fn key(&mut self, k: KeyEvent, peers: &[Peer], tx: &Sender<Msg>) -> bool {
-        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
-            return true;
+    fn send_input(&mut self, peers: &[Peer]) {
+        let text = self.input.take().unwrap_or_default();
+        let peer = peers.iter().find(|p| Some(p.id) == self.sel);
+        if let (Some(p), false) = (peer, text.trim().is_empty()) {
+            net::send(p.clone(), self.me.clone(), text, self.tx.clone());
         }
-        if let Some(i) = self.pick_icon {
-            let n = ui::ICONS.len() as isize;
-            match k.code {
-                KeyCode::Left | KeyCode::Char('h') => self.pick_icon = Some((i as isize - 1).rem_euclid(n) as u8),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.pick_icon = Some((i as isize + 1).rem_euclid(n) as u8),
-                KeyCode::Enter => {
-                    (self.icon, self.pick_icon) = (i, None);
-                    self.sync();
-                    save_setting("icone", &i.to_string());
-                }
-                KeyCode::Esc => self.pick_icon = None,
-                KeyCode::Char(c @ ('y' | 'n')) => self.answer(c == 'y'),
-                _ => {}
-            }
-            return false;
+    }
+
+    /// arquivos soltos na janela vão direto para o peer selecionado
+    fn send_files(&mut self, files: Vec<PathBuf>, peers: &[Peer]) {
+        if files.is_empty() {
+            return;
         }
-        if let Some(i) = self.pick {
-            let n = ui::COLORS.len() as isize;
-            match k.code {
-                KeyCode::Left | KeyCode::Char('h') => self.pick = Some((i as isize - 1).rem_euclid(n) as u8),
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.pick = Some((i as isize + 1).rem_euclid(n) as u8),
-                KeyCode::Enter => {
-                    (self.color, self.pick) = (i, None);
-                    self.sync();
-                    save_setting("cor", &i.to_string());
-                }
-                KeyCode::Esc => self.pick = None,
-                KeyCode::Char(c @ ('y' | 'n')) => self.answer(c == 'y'),
-                _ => {}
-            }
-            return false;
-        }
-        if let Some(buf) = &mut self.rename {
-            match k.code {
-                KeyCode::Esc => self.rename = None,
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                KeyCode::Char(c) if buf.chars().count() < NAME_MAX => buf.push(c),
-                KeyCode::Enter => {
-                    let n = net::clean(buf.trim());
-                    self.rename = None;
-                    if !n.is_empty() {
-                        *self.shared_name.lock().unwrap() = n.clone();
-                        save_setting("nome", &n);
-                        self.me = n;
-                    }
-                }
-                _ => {}
-            }
-            return false;
-        }
-        if let Some(buf) = &mut self.input {
-            match k.code {
-                KeyCode::Esc => self.input = None,
-                KeyCode::Backspace => {
-                    buf.pop();
-                }
-                KeyCode::Char(c) => buf.push(c),
-                KeyCode::Enter => {
-                    let text = self.input.take().unwrap_or_default();
-                    let peer = peers.iter().find(|p| Some(p.id) == self.sel);
-                    if let (Some(p), false) = (peer, text.trim().is_empty()) {
-                        net::send(p.clone(), self.me.clone(), text, tx.clone());
-                    }
-                }
-                _ => {}
-            }
-            return false;
-        }
-        let step = |d: isize| {
-            let i = peers.iter().position(|p| Some(p.id) == self.sel).unwrap_or(0) as isize;
-            (!peers.is_empty()).then(|| peers[(i + d).rem_euclid(peers.len() as isize) as usize].id)
+        let Some(p) = peers.iter().find(|p| Some(p.id) == self.sel) else {
+            return self.flash("escolha alguém no radar antes de soltar o arquivo");
         };
-        match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.sel = step(-1).or(self.sel),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.sel = step(1).or(self.sel),
-            KeyCode::Enter | KeyCode::Char('s') if self.sel.is_some() => self.input = Some(String::new()),
-            KeyCode::Char('c') => self.pick = Some(self.color),
-            KeyCode::Char('i') => self.pick_icon = Some(self.icon),
-            KeyCode::Char('v') => self.clip_once(peers, tx),
-            KeyCode::Char('b') => self.toggle_bridge(peers, tx),
-            KeyCode::Char('x') => {
-                self.grants.lock().unwrap().clear();
-                self.flash("pontes recebidas cortadas");
-            }
-            KeyCode::Char('r') => self.rename = Some(self.me.clone()),
-            KeyCode::Char(c @ ('y' | 'n')) => self.answer(c == 'y'),
-            _ => {}
+        for f in files {
+            net::send(p.clone(), self.me.clone(), f.to_string_lossy().into_owned(), self.tx.clone());
         }
-        false
+    }
+
+    fn set_color(&mut self, i: u8) {
+        (self.color, self.pick) = (i, None);
+        self.sync();
+        save_setting("cor", &i.to_string());
+    }
+
+    fn set_icon(&mut self, i: u8) {
+        (self.icon, self.pick_icon) = (i, None);
+        self.sync();
+        save_setting("icone", &i.to_string());
+    }
+
+    fn set_name(&mut self) {
+        let n = net::clean(self.rename.take().unwrap_or_default().trim());
+        if !n.is_empty() {
+            *self.shared_name.lock().unwrap() = n.clone();
+            save_setting("nome", &n);
+            self.me = n;
+        }
+    }
+
+    /// um passo do relógio: mensagens da rede, animação, peers vivos, seleção válida
+    fn tick(&mut self) -> Vec<Peer> {
+        while let Ok(m) = self.rx.try_recv() {
+            self.on(m);
+        }
+        let now = Instant::now();
+        let busy = self.input.is_some() || self.rename.is_some() || !self.pending.is_empty();
+        let speed = if busy { 0.3 } else if self.calm { 0.5 } else { 1.0 };
+        self.anim += now.duration_since(self.last).as_secs_f64().min(0.1) * speed;
+        self.last = now;
+        let peers = self.live();
+        if self.bridge.as_ref().is_some_and(|(id, ..)| !peers.iter().any(|p| p.id == *id)) {
+            self.stop_bridge();
+            self.flash("ponte encerrada: o aparelho saiu da rede");
+        }
+        if !peers.iter().any(|p| Some(p.id) == self.sel) {
+            self.sel = peers.first().map(|p| p.id);
+        }
+        peers
     }
 }
 
-/// Avisa fora do terminal (o pdrop pode estar em segundo plano): bell + notificação do sistema.
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        let peers = self.tick();
+        ui::draw(ui, self, &peers);
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+/// Avisa fora da janela (o pdrop pode estar em segundo plano) com notificação do sistema.
 /// Remetente e nome do arquivo vêm da rede, então vão como argumentos, nunca montados em comando.
 fn notify(t: &Transfer) {
     let body = format!("{} quer enviar {} ({})", t.peer, t.label, ui::human(t.size));
-    let mut out = io::stdout();
-    let _ = out.write_all(b"\x07").and_then(|_| out.flush());
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
         let _ = std::process::Command::new("osascript")
@@ -260,7 +232,7 @@ fn notify(t: &Transfer) {
         #[cfg(not(target_os = "macos"))]
         let _ = std::process::Command::new("notify-send")
             .args(["-a", "pdrop", "-u", "critical", "pdrop"])
-            .arg(format!("◆ {}", body.replace('&', "&amp;").replace('<', "&lt;")))
+            .arg(format!("{}", body.replace('&', "&amp;").replace('<', "&lt;")))
             .status();
     });
 }
@@ -268,8 +240,13 @@ fn notify(t: &Transfer) {
 const NAME_MAX: usize = 32;
 const NO_CLIP: &str = "sem clipboard: instale wl-clipboard (Wayland) ou xclip (X11)";
 
+/// Pasta do usuário: HOME (Linux/macOS) ou USERPROFILE (Windows).
+pub fn home() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| ".".into())
+}
+
 fn setting_path(k: &str) -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/pdrop").join(k)
+    home().join(".config/pdrop").join(k)
 }
 
 fn load_setting(k: &str) -> Option<String> {
@@ -301,7 +278,13 @@ fn hostname() -> String {
     if h.is_empty() { "pdrop".into() } else { h }
 }
 
-fn main() -> io::Result<()> {
+/// Ícone da janela (barra de tarefas no Windows/X11); no Wayland quem manda é o .desktop.
+fn window_icon() -> eframe::egui::IconData {
+    let im = image::load_from_memory(include_bytes!("../assets/pdrop.png")).expect("ícone embutido inválido").to_rgba8();
+    eframe::egui::IconData { width: im.width(), height: im.height(), rgba: im.into_raw() }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let mut me = load_setting("nome").map(|n| net::clean(&n)).unwrap_or_else(hostname); // --name vale só na sessão
     let mut direct: Vec<std::net::IpAddr> = vec![];
@@ -322,7 +305,8 @@ fn main() -> io::Result<()> {
     }
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
     let id = nanos ^ ((std::process::id() as u64) << 32);
-    let dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("Downloads");
+    // no Snap o HOME é a pasta isolada do app; os recebidos vão para o Downloads de verdade
+    let dir = std::env::var_os("SNAP_REAL_HOME").map(PathBuf::from).unwrap_or_else(home).join("Downloads");
     let (tx, rx) = mpsc::channel();
     let peers = Peers::default();
     let grants = Grants::default();
@@ -333,52 +317,25 @@ fn main() -> io::Result<()> {
     let shared_name = Arc::new(Mutex::new(me.clone()));
     net::discover(id, shared_name.clone(), port, shared_color.clone(), peers.clone(), direct)?;
 
-    let app = App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None };
-    let mut term = ratatui::init();
-    execute!(io::stdout(), EnableBracketedPaste)?;
-    let res = run(&mut term, app, rx, tx);
-    execute!(io::stdout(), DisableBracketedPaste).ok();
-    ratatui::restore();
-    res
-}
-
-fn run(term: &mut ratatui::DefaultTerminal, mut app: App, rx: Receiver<Msg>, tx: Sender<Msg>) -> io::Result<()> {
-    loop {
-        while let Ok(m) = rx.try_recv() {
-            app.on(m);
-        }
-        let now = Instant::now();
-        let busy = app.input.is_some() || app.rename.is_some() || !app.pending.is_empty();
-        let speed = if busy { 0.3 } else if app.calm { 0.5 } else { 1.0 };
-        app.anim += now.duration_since(app.last).as_secs_f64() * speed;
-        app.last = now;
-        let peers = app.live();
-        if app.bridge.as_ref().is_some_and(|(id, ..)| !peers.iter().any(|p| p.id == *id)) {
-            app.stop_bridge();
-            app.flash("ponte encerrada: o aparelho saiu da rede");
-        }
-        if !peers.iter().any(|p| Some(p.id) == app.sel) {
-            app.sel = peers.first().map(|p| p.id);
-        }
-        term.draw(|f| ui::draw(f, &app, &peers))?;
-        if event::poll(Duration::from_millis(40))? {
-            match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if app.key(k, &peers, &tx) {
-                        return Ok(());
-                    }
-                }
-                // arrastar um arquivo para o terminal cola o caminho: abre o envio já preenchido
-                Event::Paste(s) => {
-                    let s = s.trim().replace('\n', " ");
-                    match &mut app.input {
-                        Some(b) => b.push_str(&s),
-                        None if app.sel.is_some() => app.input = Some(s),
-                        None => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let opts = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default().with_app_id("pdrop").with_icon(window_icon()).with_title("pdrop").with_inner_size([1000.0, 640.0]).with_min_inner_size([640.0, 420.0]),
+        // arrastar e soltar só funciona no backend X11 do winit; com XWayland disponível, vai por ele
+        #[cfg(target_os = "linux")]
+        event_loop_builder: std::env::var_os("DISPLAY").map(|_| -> eframe::EventLoopBuilderHook {
+            Box::new(|b| {
+                winit::platform::x11::EventLoopBuilderExtX11::with_x11(b);
+            })
+        }),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "pdrop",
+        opts,
+        Box::new(move |cc| {
+            ui::setup(&cc.egui_ctx);
+            let sp = ui::Sprites::new(&cc.egui_ctx);
+            Ok(Box::new(App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None, rx, tx, sp, focus: false }))
+        }),
+    )?;
+    Ok(())
 }

@@ -202,13 +202,19 @@ fn recv(s: TcpStream, tx: &Sender<Msg>, dir: &Path, grants: &Grants) -> io::Resu
     let mut line = String::new();
     (&mut r).take(4096).read_line(&mut line)?;
     let f: Vec<&str> = line.trim_end().split('\t').collect();
-    let &["PDROP1", kind, size, from, raw] = f.as_slice() else { return Err(bad()) };
+    // 6º campo (opcional): tipo MIME do clipboard; sem ele, é texto
+    let (kind, size, from, raw, mime) = match f.as_slice() {
+        &["PDROP1", k, s, f, r] => (k, s, f, r, clip::TEXT),
+        &["PDROP1", k, s, f, r, m] if !m.is_empty() && m.len() < 128 => (k, s, f, r, m),
+        _ => return Err(bad()),
+    };
     let kind = kind.chars().next().filter(|k| "ftcb".contains(*k)).ok_or_else(bad)?;
     let (text, clip) = (kind != 'f', matches!(kind, 'c' | 'b'));
     let size = size.parse::<u64>().map_err(|_| bad())?;
-    if text && size > MAX_TEXT {
+    if (kind == 't' && size > MAX_TEXT) || (clip && size > clip::MAX) {
         return Err(bad());
     }
+    let mime = mime.to_string();
     if clip && !clip::available() {
         r.get_mut().write_all(b"N")?;
         return Ok(());
@@ -241,14 +247,14 @@ fn recv(s: TcpStream, tx: &Sender<Msg>, dir: &Path, grants: &Grants) -> io::Resu
     let res = (|| -> io::Result<String> {
         let mut src = (&mut r).take(size);
         if text {
-            let mut buf = Vec::new();
+            let mut buf = Vec::with_capacity(size as usize);
             pump(&mut src, &mut buf, id, size, tx)?;
-            let s = String::from_utf8_lossy(&buf).into_owned();
             if clip {
-                clip::set(&s)?;
-                return Ok(s.chars().take(200).collect());
+                let c = clip::Clip { mime, data: buf };
+                clip::set(&c)?;
+                return Ok(format!("no clipboard · {}", preview(&c)));
             }
-            return Ok(s);
+            return Ok(String::from_utf8_lossy(&buf).into_owned());
         }
         let (path, mut f) = create_unique(dir, &name)?;
         match pump(&mut src, &mut f, id, size, tx) {
@@ -324,24 +330,33 @@ pub fn send(to: Peer, me: String, input: String, tx: Sender<Msg>) {
             Ok((kind, name, size, mut src)) => {
                 (t.label, t.size, t.kind) = (name.clone(), size, kind);
                 tx.send(Msg::Start(t)).ok();
-                let r = go(id, &to, &me, kind, &name, size, &mut *src, &tx);
+                let r = go(id, &to, &me, kind, &name, None, size, &mut *src, &tx);
                 tx.send(Msg::End(id, r.map_err(|e| e.to_string()))).ok();
             }
         }
     });
 }
 
-/// Envia um texto copiado ao clipboard do peer (kind 'c' uma vez, 'b' ponte). Bloqueia; emite Start/End.
-pub fn push_clip(to: &Peer, me: &str, text: &str, kind: char, tx: &Sender<Msg>) -> io::Result<()> {
+/// Resumo de uma linha do que está no clipboard: começo do texto, ou tipo e tamanho.
+pub fn preview(c: &clip::Clip) -> String {
+    if c.is_text() {
+        String::from_utf8_lossy(&c.data[..c.data.len().min(512)]).chars().map(|ch| if ch.is_control() { ' ' } else { ch }).take(60).collect()
+    } else {
+        format!("{} ({})", c.mime, crate::ui::human(c.data.len() as u64))
+    }
+}
+
+/// Envia o conteúdo inteiro do clipboard, com o tipo, ao clipboard do peer (kind 'c' uma vez, 'b' ponte). Bloqueia; emite Start/End.
+pub fn push_clip(to: &Peer, me: &str, c: &clip::Clip, kind: char, tx: &Sender<Msg>) -> io::Result<()> {
     let id = next_id();
-    let note: String = text.chars().filter(|c| !c.is_control()).take(60).collect();
-    let size = text.len() as u64;
+    let note = preview(c);
+    let size = c.data.len() as u64;
     let t = Transfer { id, peer: to.name.clone(), label: "clipboard".into(), size, done: 0, up: true, state: State::Waiting, kind, note: note.clone() };
     tx.send(Msg::Start(t)).ok();
-    let r = if size > MAX_TEXT {
-        Err(io::Error::other("texto grande demais"))
+    let r = if size > clip::MAX {
+        Err(io::Error::other("clipboard grande demais"))
     } else {
-        go(id, to, me, kind, &note, size, &mut Cursor::new(text.as_bytes()), tx)
+        go(id, to, me, kind, &note, Some(&c.mime), size, &mut Cursor::new(&c.data), tx)
     };
     tx.send(Msg::End(id, r.as_ref().map(|_| note.clone()).map_err(|e| e.to_string()))).ok();
     r.map(|_| ())
@@ -355,7 +370,7 @@ pub fn bridge(to: Peer, me: String, tx: Sender<Msg>, stop: Arc<AtomicBool>) {
         while !stop.load(Ordering::Relaxed) {
             sleep(Duration::from_millis(400));
             let Some(cur) = clip::get() else { continue };
-            if cur.is_empty() || cur.len() as u64 > MAX_TEXT || !clip::changed(&cur) {
+            if cur.data.is_empty() || !clip::changed(&cur) {
                 continue;
             }
             if push_clip(&to, &me, &cur, 'b', &tx).is_err() {
@@ -386,12 +401,15 @@ fn prepare(input: &str) -> io::Result<Prepared> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn go(id: u64, to: &Peer, me: &str, kind: char, name: &str, size: u64, src: &mut dyn Read, tx: &Sender<Msg>) -> io::Result<String> {
+fn go(id: u64, to: &Peer, me: &str, kind: char, name: &str, mime: Option<&str>, size: u64, src: &mut dyn Read, tx: &Sender<Msg>) -> io::Result<String> {
     let mut s = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5))?;
     s.set_read_timeout(Some(Duration::from_secs(60)))?;
     s.set_write_timeout(Some(Duration::from_secs(30)))?;
     let name: String = name.chars().filter(|c| !c.is_control()).collect();
-    writeln!(s, "PDROP1\t{kind}\t{size}\t{me}\t{name}")?;
+    match mime.filter(|m| !m.contains(['\t', '\n'])) {
+        Some(m) => writeln!(s, "PDROP1\t{kind}\t{size}\t{me}\t{name}\t{m}")?,
+        None => writeln!(s, "PDROP1\t{kind}\t{size}\t{me}\t{name}")?,
+    }
     let mut ans = [0u8; 1];
     s.read_exact(&mut ans)?;
     if ans[0] != b'Y' {
@@ -404,9 +422,9 @@ fn go(id: u64, to: &Peer, me: &str, kind: char, name: &str, size: u64, src: &mut
 fn clean_path(s: &str) -> PathBuf {
     let s = s.trim().trim_matches(|c| c == '\'' || c == '"');
     let s = s.strip_prefix("file://").unwrap_or(s).replace("%20", " ").replace("\\ ", " ");
-    match (s.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => Path::new(&home).join(rest),
-        _ => s.into(),
+    match s.strip_prefix("~/") {
+        Some(rest) => crate::home().join(rest),
+        None => s.into(),
     }
 }
 

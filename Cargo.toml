@@ -2,8 +2,53 @@
 name = "pdrop"
 version = "0.1.0"
 edition = "2024"
+description = "AirDrop-style sharing of files, text and clipboard on your local network"
+license = "MIT"
+repository = "https://github.com/Parsec-Inc/pdrop"
+homepage = "https://github.com/Parsec-Inc/pdrop"
+readme = "README.md"
+keywords = ["airdrop", "lan", "file-transfer", "p2p"]
+categories = ["network-programming"]
 
 [dependencies]
+eframe = "0.37.0"
 if-addrs = "0.15.0"
-ratatui = "0.30.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 socket2 = { version = "0.6.5", features = ["all"] }
+
+# só para forçar X11 no Linux: o backend Wayland do winit 0.30 não entrega arquivos arrastados
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[package.metadata.deb]
+maintainer = "Parsec-Inc <noreply@github.com>"
+section = "net"
+priority = "optional"
+# a janela carrega wayland/x11/GL em runtime (dlopen), então não dá para deixar o $auto adivinhar
+depends = "libc6 (>= 2.31)"
+recommends = "wl-clipboard | xclip, libnotify-bin"
+extended-description = "Run pdrop on two or more machines on the same network and they appear on each other's radar. Select a peer and drop files, text or your clipboard to them. No accounts, no servers."
+assets = [
+    ["target/release/pdrop", "usr/bin/", "755"],
+    ["assets/pdrop.desktop", "usr/share/applications/", "644"],
+    ["assets/pdrop.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["LICENSE", "usr/share/doc/pdrop/", "644"],
+    ["README.md", "usr/share/doc/pdrop/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/pdrop", dest = "/usr/bin/pdrop", mode = "755" },
+    { source = "assets/pdrop.desktop", dest = "/usr/share/applications/pdrop.desktop", mode = "644" },
+    { source = "assets/pdrop.png", dest = "/usr/share/icons/hicolor/256x256/apps/pdrop.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/pdrop/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/pdrop/README.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.recommends]
+wl-clipboard = "*"
+libnotify = "*"
