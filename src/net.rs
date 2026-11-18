@@ -603,15 +603,14 @@ pub fn bridge(to: Peer, me: Who, tx: Sender<Msg>, stop: Arc<AtomicBool>) {
 
 fn prepare(inputs: &[String]) -> io::Result<Job> {
     let paths: Vec<PathBuf> = inputs.iter().map(|i| clean_path(i)).collect();
-    if let ([input], [path]) = (inputs, paths.as_slice()) {
-        if !path.exists() {
+    if let ([input], [path]) = (inputs, paths.as_slice())
+        && !path.exists() {
             let b = input.trim().as_bytes().to_vec();
             if b.len() as u64 > MAX_TEXT {
                 return Err(io::Error::other("texto grande demais"));
             }
             return Ok(Job::Text(b));
         }
-    }
     let mut es = vec![];
     for p in &paths {
         let p = fs::canonicalize(p).map_err(|_| io::Error::other(format!("não achei {}", p.display())))?;

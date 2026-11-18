@@ -322,11 +322,10 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
 
 fn keys(ctx: &egui::Context, app: &App) -> Act {
     let typing = ctx.text_edit_focused();
-    if !typing {
-        if let Some(id) = ctx.memory(|m| m.focused()) {
+    if !typing
+        && let Some(id) = ctx.memory(|m| m.focused()) {
             ctx.memory_mut(|m| m.surrender_focus(id));
         }
-    }
     ctx.input(|i| {
         if i.key_pressed(Key::Escape) {
             return Act::Cancel;
@@ -526,14 +525,13 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let busy: Vec<_> = app.xfers.iter().filter(|x| matches!(x.state, State::Waiting | State::Active)).collect();
 
-    if resp.clicked() {
-        if let Some(m) = resp.interact_pointer_pos() {
+    if resp.clicked()
+        && let Some(m) = resp.interact_pointer_pos() {
             let hit = peers.iter().map(|q| (q, scr(place(q)).distance(m))).filter(|(_, d)| *d < 34.0).min_by(|a, b| a.1.total_cmp(&b.1));
             if let Some((q, _)) = hit {
                 app.sel = Some(q.id);
             }
         }
-    }
 
     let trail = [0.8, 0.34, 0.18, 0.08].map(|k| mix(DISC, acc, k));
     let mut img = Raster { w, h, px: vec![Color32::TRANSPARENT; w * h] };
@@ -828,10 +826,9 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 }
             }
             ui.label(txt(format!("{} · ←→ enter esc", ICONS[app.pick_icon.unwrap() as usize]), DIM));
-        } else if app.rename.is_some() {
+        } else if let Some(buf) = app.rename.as_mut() {
             ui.label(txt("seu nome ›", acc));
             let focus = std::mem::take(&mut app.focus);
-            let buf = app.rename.as_mut().unwrap();
             let r = well(ui, &app.sp, egui::TextEdit::singleline(buf).char_limit(crate::NAME_MAX).desired_width(220.0));
             if focus {
                 r.request_focus();
@@ -844,6 +841,7 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             let n = app.targets(peers).len();
             ui.label(txt(if n > 1 { format!("para {n} aparelhos ›") } else { format!("para {} ›", to.as_deref().unwrap_or("?")) }, acc));
             let focus = std::mem::take(&mut app.focus);
+            #[allow(clippy::unnecessary_unwrap)]
             let buf = app.input.as_mut().unwrap();
             let r = well(ui, &app.sp, egui::TextEdit::singleline(buf).hint_text(txt("caminho de arquivo ou pasta (ou arraste) · ou texto livre", DIM)).desired_width(f32::INFINITY));
             if focus {

@@ -19,20 +19,25 @@ do Homebrew compila o código-fonte na máquina de quem instala (`brew install -
 
 ## Fazer uma release
 
-Não tem passo manual: todo push na `main` roda `.github/workflows/release.yml`. Os testes não
-rodam de novo aqui: eles já passaram no PR (`ci.yml`, testes e build em Linux, macOS e Windows,
-cancelando o run anterior quando entra um push novo no mesmo PR).
+Os testes (`ci.yml`: clippy e `cargo test` em Linux, macOS e Windows) rodam em todo push fora da
+`main`; um push novo na mesma branch cancela o teste anterior.
 
-1. **bump**: o commitizen (`.cz.toml`) calcula a versão pelos commits desde a última tag
-   (`feat` sobe minor, `fix` sobe patch, `!` ou `BREAKING CHANGE` sobe major), troca a
-   versão no `Cargo.toml`, `Cargo.lock`, PKGBUILD, `.spec`, `snapcraft.yaml` e na fórmula, escreve o
-   `CHANGELOG.md`, cria a tag `vX.Y.Z` e dá push. Sem `feat`/`fix` desde a última tag, para aqui.
-2. **builds**: deb, rpm, Arch, MSI, macOS e snap, todos da tag nova.
-3. **release**: anexa tudo, com `SHA256SUMS` e as notas do CHANGELOG. Só o linux é obrigatório:
-   se outra plataforma falhar, a release sai sem ela.
-4. **aur**, **homebrew** e o **snap** na loja: só com as variáveis ligadas (abaixo).
+Não tem passo manual: todo PR mergeado na `main` roda `.github/workflows/release.yml`.
 
-Para forçar uma versão, rode o workflow **release** à mão (*Actions > release > Run workflow*) e
+1. **tests** e **bump** começam juntos. O bump roda o commitizen (`.cz.toml`), que calcula a versão
+   pelos commits desde a última tag (`feat` sobe minor, `fix` sobe patch, `!`/`BREAKING CHANGE`
+   sobe major), troca a versão no `Cargo.toml`, `Cargo.lock`, PKGBUILD, `.spec`, `snapcraft.yaml` e
+   na fórmula, escreve o `CHANGELOG.md` e cria a tag `vX.Y.Z`, só localmente. O commit e a tag vão
+   num git bundle para os builds. Sem `feat`/`fix` desde a última tag, para aqui.
+2. **builds**: deb, rpm, Arch, MSI, macOS e snap, todos do commit do bump, em paralelo com os testes.
+3. **release**: só com os testes e o linux verdes. Dá push do commit do bump e da tag na `main` e
+   anexa tudo, com `SHA256SUMS` e as notas do CHANGELOG. Se outra plataforma falhar, a release sai
+   sem ela.
+4. **snap-release**: o snap é o build mais lento, então a release não espera por ele. Quando fica
+   pronto, o `.snap` é anexado à release (com o `SHA256SUMS` refeito) e vai para a loja.
+5. **aur**, **homebrew** e o **snap** na loja: só com as variáveis ligadas (abaixo).
+
+Para forçar uma versão, rode o workflow **release** à mão na `main` (*Actions > release > Run workflow*) e
 escolha o incremento. Os commits precisam seguir o Conventional Commits (`feat:`, `fix:`, `ci:`...).
 
 ## Firewall

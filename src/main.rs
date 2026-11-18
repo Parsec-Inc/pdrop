@@ -81,11 +81,10 @@ impl App {
             } else {
                 self.marked = peers.iter().map(|p| p.id).collect();
             }
-        } else if let Some(id) = self.sel {
-            if !self.marked.remove(&id) {
+        } else if let Some(id) = self.sel
+            && !self.marked.remove(&id) {
                 self.marked.insert(id);
             }
-        }
     }
 
     pub fn trusted(&self, uid: u128) -> bool {
@@ -387,7 +386,7 @@ fn notify(body: String) {
         #[cfg(not(target_os = "macos"))]
         let _ = std::process::Command::new("notify-send")
             .args(["-a", "pdrop", "-u", "critical", "pdrop"])
-            .arg(format!("{}", body.replace('&', "&amp;").replace('<', "&lt;")))
+            .arg(body.replace('&', "&amp;").replace('<', "&lt;"))
             .status();
     });
 }
