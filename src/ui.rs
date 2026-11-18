@@ -261,6 +261,7 @@ enum Act {
     CutBridges,
     Trust,
     Vis,
+    View,
     Hist,
     Mark(bool),
     Clips,
@@ -301,6 +302,7 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         }
         Act::Trust => app.toggle_trust(peers),
         Act::Vis => app.cycle_vis(),
+        Act::View => app.cycle_view(),
         Act::Hist => app.toggle_hist(),
         Act::Mark(all) => app.mark(peers, all),
         Act::Clips => app.toggle_clips(),
@@ -373,6 +375,8 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
         match () {
             _ if prev => Act::Step(-1),
             _ if next => Act::Step(1),
+            _ if app.view == 1 && k(Key::ArrowUp) => Act::Step(-(app.cols as isize)),
+            _ if app.view == 1 && k(Key::ArrowDown) => Act::Step(app.cols as isize),
             _ if ok || k(Key::S) => Act::OpenInput,
             _ if k(Key::C) => Act::PickColor,
             _ if k(Key::I) => Act::PickIcon,
@@ -382,6 +386,7 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
             _ if k(Key::R) => Act::OpenRename,
             _ if k(Key::T) => Act::Trust,
             _ if k(Key::M) => Act::Vis,
+            _ if k(Key::D) => Act::View,
             _ if k(Key::G) => Act::Hist,
             _ if k(Key::A) => Act::Mark(i.modifiers.shift),
             _ if k(Key::P) => Act::Clips,
@@ -422,7 +427,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             transfers(ui, app)
         }
     });
-    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| radar(ui, app, peers));
+    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match app.view {
+        1 => grid(ui, app, peers),
+        2 => sky(ui, app, peers),
+        _ => radar(ui, app, peers),
+    });
 }
 
 fn header(ui: &mut egui::Ui, app: &App, n: usize) {
@@ -903,6 +912,9 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         if button(ui, sp, None, vis, "M", true, (app.vis() != 0).then_some(acc)).clicked() {
             act = Act::Vis;
         }
+        if button(ui, sp, None, &format!("Visão: {}", crate::VIEWS[app.view as usize]), "D", true, None).clicked() {
+            act = Act::View;
+        }
         if button(ui, sp, None, "Histórico", "G", true, app.hist_sel.is_some().then_some(acc)).clicked() {
             act = Act::Hist;
         }
@@ -925,4 +937,198 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         }
     });
     apply(app, act, peers);
+}
+
+fn hash(n: u64) -> u64 {
+    let mut z = n.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn unit(n: u64) -> f64 {
+    (hash(n) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn tagged(app: &App, q: &Peer) -> String {
+    let tags = format!("{}{}", if app.trusted(q.uid) { "*" } else { "" }, if app.marked.contains(&q.id) { "+" } else { "" });
+    if tags.is_empty() { q.name.clone() } else { format!("{tags} {}", q.name) }
+}
+
+fn gone(q: &Peer) -> f64 {
+    ((q.seen.elapsed().as_secs_f64() - 4.0) / 2.0).clamp(0.0, 1.0)
+}
+
+fn busy_with(app: &App, q: &Peer) -> bool {
+    app.xfers.iter().any(|x| x.peer == q.name && matches!(x.state, State::Waiting | State::Active))
+}
+
+fn pop(app: &App, p: &egui::Painter, q: &Peer, pos: Pos2, col: Rgb) {
+    let age = q.born.elapsed().as_secs_f64();
+    if age < 0.9 {
+        let e = out_expo(age / 0.9);
+        app.sp.ping.draw(p, ((e * 6.0) as usize).min(5), pos, S, c(col).gamma_multiply((1.0 - e) as f32));
+    }
+}
+
+// seleção: grade de retratos, no estilo das telas de escolha de personagem
+fn grid(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
+    const TW: f32 = 56.0;
+    const TH: f32 = 64.0;
+    const GAP: f32 = 6.0;
+    let (acc, t) = (app.acc(), app.anim);
+    let area = ui.available_size();
+    let cols = (((area.x / S + GAP) / (TW + GAP)) as usize).clamp(1, 12);
+    app.cols = cols;
+    let font = FontId::proportional(TXT);
+    let mut pick = None;
+    let gid = ui.make_persistent_id("gridsel");
+    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        let rows = peers.len().max(3).div_ceil(cols).max(1) as f32;
+        let n = peers.len().max(1).min(cols) as f32;
+        let (gw, gh) = (n * (TW + GAP) - GAP, rows * (TH + GAP) - GAP);
+        let (rect, _) = ui.allocate_exact_size(vec2(area.x, (gh * S + 16.0 * S).max(area.y)), Sense::hover());
+        let p = ui.painter().clone();
+        let x0 = rect.left() + ((rect.width() - gw * S) / 2.0 / S).floor() * S;
+        let y0 = rect.top() + (((area.y - gh * S) / 2.0 / S).floor() * S).max(8.0 * S);
+        let slot = |i: usize| Rect::from_min_size(pos2(x0 + (i % cols) as f32 * (TW + GAP) * S, y0 + (i / cols) as f32 * (TH + GAP) * S), vec2(TW * S, TH * S));
+        if peers.is_empty() {
+            for i in 0..3 {
+                p.add(app.sp.ui.nine(3, slot(i), 4.0, Color32::WHITE));
+            }
+            let dots = ".".repeat((t * 2.0) as usize % 4);
+            p.text(snap(pos2(x0 + gw * S / 2.0, y0 + (TH + 10.0) * S)), Align2::CENTER_TOP, format!("procurando{dots}"), font, c(MUTED));
+            return;
+        }
+        for (i, q) in peers.iter().enumerate() {
+            let r = slot(i);
+            let resp = ui.interact(r, ui.make_persistent_id(("tile", q.id)), Sense::click());
+            if resp.clicked() {
+                pick = Some(q.id);
+            }
+            let (sel, fade) = (app.sel == Some(q.id), gone(q));
+            let pc = COLORS[q.color as usize % COLORS.len()].1;
+            if sel && ui.data_mut(|d| d.get_temp::<u64>(gid) != Some(q.id)) {
+                ui.data_mut(|d| d.insert_temp(gid, q.id));
+                ui.scroll_to_rect(r.expand(8.0 * S), None);
+            }
+            p.add(app.sp.ui.nine(if resp.hovered() && !sel { 1 } else { 7 }, r, 4.0, Color32::WHITE));
+            if sel {
+                p.add(app.sp.ui.nine(8, r, 3.0, c(lerp(pc, DIM, fade))));
+            }
+            let ic = c(lerp(if sel || resp.hovered() { pc } else { lerp(MUTED, pc, 0.75) }, DIM, fade));
+            let bob = if sel { ((t * 4.0).sin() > 0.0) as i32 as f32 * -S } else { 0.0 };
+            let at = snap(pos2(r.center().x, r.top() + 24.0 * S + bob));
+            app.sp.icons.draw(&p, (q.color / 8) as usize % ICONS.len(), at, 2.0 * S, ic);
+            pop(app, &p, q, at, pc);
+            let mut name = tagged(app, q);
+            while name.len() > 1 && p.layout_no_wrap(name.clone(), font.clone(), Color32::WHITE).size().x > (TW - 6.0) * S {
+                name.pop();
+            }
+            p.text(snap(pos2(r.center().x, r.top() + 42.0 * S)), Align2::CENTER_TOP, name, font.clone(), c(lerp(if sel { pc } else { MUTED }, DIM, fade)));
+            let lvl = q.rtt.map_or(0, |ms| if ms < 3.0 { 4 } else if ms < 15.0 { 3 } else if ms < 50.0 { 2 } else { 1 });
+            for b in 0..4 {
+                let h = 2.0 * (b + 1) as f32;
+                let br = Rect::from_min_size(pos2(r.left() + (TW / 2.0 - 8.0 + 4.0 * b as f32) * S, r.bottom() - (5.0 + h) * S), vec2(3.0 * S, h * S));
+                p.rect_filled(br, 0.0, if b < lvl { c(lerp(pc, DIM, fade)) } else { c(GRID) });
+            }
+            if busy_with(app, q) {
+                let lit = (t * 6.0) as usize % 3;
+                for d in 0..3 {
+                    p.rect_filled(Rect::from_min_size(pos2(r.right() - (14.0 - 4.0 * d as f32) * S, r.top() + 4.0 * S), vec2(2.0 * S, 2.0 * S)), 0.0, if d == lit { c(acc) } else { c(DIM) });
+                }
+            }
+        }
+    });
+    if pick.is_some() {
+        app.sel = pick;
+    }
+}
+
+// constelação: céu noturno, cada peer é uma estrela ligada a você
+fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
+    let (acc, t) = (app.acc(), app.anim);
+    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click());
+    let outer = Rect::from_min_max(snap(resp.rect.min), snap(resp.rect.max)).shrink(6.0 * S);
+    let rect = outer.shrink(4.0 * S);
+    let (w, h) = ((rect.width() / S) as usize, (rect.height() / S) as usize);
+    if w < 16 || h < 16 {
+        return;
+    }
+    p.add(app.sp.ui.nine(7, outer, 4.0, Color32::WHITE));
+    let (cx, cy) = (w as i32 / 2, h as i32 / 2);
+    let (rx, ry) = ((w as f64 / 2.0 - 30.0).max(20.0), (h as f64 / 2.0 - 24.0).max(20.0));
+    let place = |q: &Peer| {
+        let (a, k) = (angle(q.id), 0.45 + 0.5 * unit(q.id));
+        (cx + (rx * k * a.cos()).round() as i32, cy - (ry * k * a.sin()).round() as i32)
+    };
+    let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
+    if resp.clicked() {
+        if let Some(m) = resp.interact_pointer_pos() {
+            let hit = peers.iter().map(|q| (q, scr(place(q)).distance(m))).filter(|(_, d)| *d < 34.0).min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((q, _)) = hit {
+                app.sel = Some(q.id);
+            }
+        }
+    }
+    let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
+    let mut img = Raster { w, h, px: vec![Color32::TRANSPARENT; w * h] };
+    for i in 0..(w * h / 90) as u64 {
+        let (x, y) = ((hash(i * 2) % w as u64) as i32, (hash(i * 2 + 1) % h as u64) as i32);
+        let lit = ((t * 0.8 + unit(i + 900) * TAU).sin() > 0.85) as usize;
+        img.set(x, y, c([GRID, DIM][lit]));
+    }
+    let mut labels = vec![];
+    for q in peers {
+        let (pc, fade) = (COLORS[q.color as usize % COLORS.len()].1, gone(q));
+        let at = place(q);
+        let sel = app.sel == Some(q.id);
+        let out = app.bridge.as_ref().is_some_and(|(id, ..)| *id == q.id) || app.xfers.iter().any(|x| x.peer == q.name && x.up && matches!(x.state, State::Waiting | State::Active));
+        let inn = granted.contains(&q.uid) || app.xfers.iter().any(|x| x.peer == q.name && !x.up && matches!(x.state, State::Waiting | State::Active));
+        let (dx, dy) = ((at.0 - cx) as f64, (at.1 - cy) as f64);
+        let steps = dx.hypot(dy) as i32 / 4;
+        for i in 1..steps {
+            let f = i as f64 / steps as f64;
+            img.set(cx + (dx * f).round() as i32, cy + (dy * f).round() as i32, c(if sel { lerp(DIM, pc, 0.5) } else { GRID }));
+        }
+        if out || inn {
+            for i in 0..6 {
+                let f = (t * 0.7 + i as f64 / 6.0) % 1.0;
+                let f = if inn && !out { 1.0 - f } else { f };
+                img.set(cx + (dx * f).round() as i32, cy + (dy * f).round() as i32, c(acc));
+            }
+        }
+        let col = c(lerp(if sel { pc } else { lerp(MUTED, pc, 0.7) }, DIM, fade));
+        let big = sel || (t * 1.7 + angle(q.id) * 5.0).sin() > 0.92;
+        img.blip(at.0, at.1, 1, col);
+        for k in 2..=if big { 4 } else { 2 } {
+            for (a, b) in [(k, 0), (-k, 0), (0, k), (0, -k)] {
+                img.set(at.0 + a, at.1 + b, col);
+            }
+        }
+        if sel {
+            img.ring(at.0, at.1, 7 + ((t * 4.0).sin() > 0.0) as i32, c(lerp(acc, DIM, fade)));
+        }
+        labels.push((q, scr(at), pc, sel, fade));
+    }
+    img.blip(cx, cy, 2, c(FG));
+    let tex = ColorImage::new([w, h], img.px);
+    match &mut app.sp.radar {
+        Some(t) => t.set(tex, TextureOptions::NEAREST),
+        None => app.sp.radar = Some(ui.ctx().load_texture("radar", tex, TextureOptions::NEAREST)),
+    }
+    let id = app.sp.radar.as_ref().unwrap().id();
+    p.image(id, Rect::from_min_size(rect.min, vec2(w as f32 * S, h as f32 * S)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    let font = FontId::proportional(TXT);
+    for (q, pos, pc, sel, fade) in labels {
+        pop(app, &p, q, pos, pc);
+        let lab = lerp(if sel { pc } else { MUTED }, DIM, fade);
+        p.text(snap(pos + vec2(0.0, 6.0 * S)), Align2::CENTER_TOP, tagged(app, q), font.clone(), c(lab));
+    }
+    let ctr = scr((cx, cy));
+    p.text(snap(ctr + vec2(0.0, 5.0 * S)), Align2::CENTER_TOP, if peers.is_empty() { format!("procurando{}", ".".repeat((t * 2.0) as usize % 4)) } else { "você".into() }, font, c(MUTED));
+    let mine = app.pick_icon.unwrap_or(app.icon) as usize;
+    if mine > 0 {
+        app.sp.icons.draw(&p, mine, ctr + vec2(0.0, -15.0 * S), S, c(acc));
+    }
 }
