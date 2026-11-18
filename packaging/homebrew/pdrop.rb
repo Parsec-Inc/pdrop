@@ -3,7 +3,7 @@
 class Pdrop < Formula
   desc "AirDrop-style sharing of files, text and clipboard on your local network"
   homepage "https://github.com/Parsec-Inc/pdrop"
-  url "https://github.com/Parsec-Inc/pdrop/archive/refs/tags/v1.0.1.tar.gz"
+  url "https://github.com/Parsec-Inc/pdrop/archive/refs/tags/v1.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
   head "https://github.com/Parsec-Inc/pdrop.git", branch: "main"

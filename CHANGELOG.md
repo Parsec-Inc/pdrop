@@ -1,3 +1,13 @@
+## v1.1.0 (2026-11-18)
+
+### Feat
+
+- added new views for pdrop
+
+### Fix
+
+- clippy diagnostics
+
 ## v1.0.1 (2026-11-17)
 
 ### Fix
