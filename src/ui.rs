@@ -1061,13 +1061,11 @@ fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         (cx + (rx * k * a.cos()).round() as i32, cy - (ry * k * a.sin()).round() as i32)
     };
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
-    if resp.clicked() {
-        if let Some(m) = resp.interact_pointer_pos() {
-            let hit = peers.iter().map(|q| (q, scr(place(q)).distance(m))).filter(|(_, d)| *d < 34.0).min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((q, _)) = hit {
-                app.sel = Some(q.id);
-            }
-        }
+    if resp.clicked()
+        && let Some(m) = resp.interact_pointer_pos()
+        && let Some((q, _)) = peers.iter().map(|q| (q, scr(place(q)).distance(m))).filter(|(_, d)| *d < 34.0).min_by(|a, b| a.1.total_cmp(&b.1))
+    {
+        app.sel = Some(q.id);
     }
     let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let mut img = Raster { w, h, px: vec![Color32::TRANSPARENT; w * h] };
