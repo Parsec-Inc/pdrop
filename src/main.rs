@@ -50,6 +50,8 @@ pub struct App {
     pub clips: VecDeque<(String, clip::Clip)>,
     pub clip_sel: Option<usize>,
     pub marked: std::collections::HashSet<u64>,
+    pub view: u8,
+    pub cols: usize,
 }
 
 #[derive(Clone)]
@@ -114,6 +116,11 @@ impl App {
         self.policy.vis.store(v, Ordering::Relaxed);
         save_setting("visibilidade", &v.to_string());
         self.flash(["visível para todos", "visível só para confiáveis", "invisível: ninguém te vê, você ainda envia"][v as usize]);
+    }
+
+    fn cycle_view(&mut self) {
+        self.view = (self.view + 1) % VIEWS.len() as u8;
+        save_setting("visao", &self.view.to_string());
     }
 
     fn toggle_hist(&mut self) {
@@ -397,6 +404,8 @@ const NO_CLIP: &str = "sem clipboard: instale wl-clipboard (Wayland) ou xclip (X
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| ".".into())
 }
+
+pub const VIEWS: [&str; 3] = ["sonar", "seleção", "constelação"];
 
 fn setting_path(k: &str) -> PathBuf {
     home().join(".config/pdrop").join(k)
@@ -697,7 +706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |cc| {
             ui::setup(&cc.egui_ctx);
             let sp = ui::Sprites::new(&cc.egui_ctx);
-            Ok(Box::new(App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None, rx, tx, sp, focus: false, uid, policy, hist: load_hist(), hist_sel: None, clips: VecDeque::new(), clip_sel: None, marked: Default::default(), firewall }))
+            Ok(Box::new(App { me, peers, sel: None, input: None, xfers: vec![], pending: VecDeque::new(), anim: 0.0, last: Instant::now(), calm, color, pick: None, icon, pick_icon: None, rename: None, shared_name, shared_color, bridge: None, grants, flash: None, rx, tx, sp, focus: false, uid, policy, hist: load_hist(), hist_sel: None, clips: VecDeque::new(), clip_sel: None, marked: Default::default(), firewall, view: load_setting("visao").and_then(|s| s.parse().ok()).filter(|v| (*v as usize) < VIEWS.len()).unwrap_or(0), cols: 1 }))
         }),
     )?;
     Ok(())
