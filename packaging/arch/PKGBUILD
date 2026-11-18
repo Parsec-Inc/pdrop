@@ -1,6 +1,6 @@
 # Maintainer: Parsec-Inc <noreply@github.com>
 pkgname=pdrop
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc='AirDrop-style sharing of files, text and clipboard on your local network'
 arch=('x86_64' 'aarch64')

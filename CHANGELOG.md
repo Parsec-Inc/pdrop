@@ -1,3 +1,9 @@
+## v1.0.1 (2026-11-17)
+
+### Fix
+
+- **net.rs**: removed buffer overload on socket ARP fail
+
 ## v1.0.0 (2026-11-17)
 
 ### BREAKING CHANGE
