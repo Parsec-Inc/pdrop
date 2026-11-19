@@ -499,6 +499,10 @@ fn recv_files(
         let &[rel, size, mtime] = f.as_slice() else {
             return Err(bad());
         };
+        // sufixo `z` no mtime = remetente oferece zstd (remetentes antigos nunca oferecem; receptores antigos tratam como texto opaco)
+        let (mtime, zip) = mtime
+            .strip_suffix('z')
+            .map_or((mtime, false), |m| (m, true));
         let size = size.parse::<u64>().map_err(|_| bad())?;
         let comps = rel_components(rel).ok_or_else(bad)?;
         if done.saturating_add(size) > total {
@@ -508,7 +512,7 @@ fn recv_files(
         let _lock = PartLock::take(&part)?;
         let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         let off = if have < size { have } else { 0 };
-        writeln!(r.get_mut(), "{off}")?;
+        writeln!(r.get_mut(), "{off}{}", if zip { "\tz" } else { "" })?;
         let mut h = blake3::Hasher::new();
         let mut file = if off > 0 {
             let mut f = OpenOptions::new().read(true).append(true).open(&part)?;
@@ -518,17 +522,33 @@ fn recv_files(
             File::create(&part)?
         };
         let want = size - off;
-        let got = pump(
-            &mut HashRead {
-                r: (&mut *r).take(want),
-                h: &mut h,
-            },
-            &mut file,
-            id,
-            done + off,
-            total,
-            tx,
-        )?;
+        let got = if zip {
+            // +1 limita bomba de descompressão e força ler o fim do quadro (EOF) antes do hash
+            let dec = zstd::Decoder::with_buffer(&mut *r)?.single_frame();
+            pump(
+                &mut HashRead {
+                    r: dec.take(want + 1),
+                    h: &mut h,
+                },
+                &mut file,
+                id,
+                done + off,
+                total,
+                tx,
+            )?
+        } else {
+            pump(
+                &mut HashRead {
+                    r: (&mut *r).take(want),
+                    h: &mut h,
+                },
+                &mut file,
+                id,
+                done + off,
+                total,
+                tx,
+            )?
+        };
         if got != want {
             return Err(eof("conexão interrompida"));
         }
@@ -980,16 +1000,34 @@ fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> 
     Ok(s)
 }
 
+/// só vale comprimir o que ainda não está comprimido
+fn compressible(rel: &str) -> bool {
+    const SKIP: &[&str] = &[
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "avif", "mp4", "mkv", "mov", "webm", "avi",
+        "m4v", "mp3", "flac", "ogg", "m4a", "opus", "aac", "zip", "gz", "tgz", "bz2", "xz", "zst",
+        "7z", "rar", "apk", "jar", "docx", "xlsx", "pptx",
+    ];
+    Path::new(rel)
+        .extension()
+        .is_none_or(|e| !SKIP.contains(&e.to_string_lossy().to_lowercase().as_str()))
+}
+
 fn send_files(s: Secure, es: &[Entry], id: u64, total: u64, tx: &Sender<Msg>) -> io::Result<()> {
     let mut rd = BufReader::new(s);
     let mut line = String::new();
     let mut done = 0u64;
     for e in es {
-        writeln!(rd.get_mut(), "{}\t{}\t{}", e.rel, e.size, e.mtime)?;
+        let offer = if compressible(&e.rel) { "z" } else { "" };
+        writeln!(rd.get_mut(), "{}\t{}\t{}{offer}", e.rel, e.size, e.mtime)?;
         line.clear();
         rd.read_line(&mut line)?;
-        let off = line
+        let (off, zip) = line
             .trim()
+            .split_once('\t')
+            .map_or((line.trim(), false), |(o, z)| {
+                (o, z == "z" && !offer.is_empty())
+            });
+        let off = off
             .parse::<u64>()
             .ok()
             .filter(|&o| o <= e.size)
@@ -998,17 +1036,18 @@ fn send_files(s: Secure, es: &[Entry], id: u64, total: u64, tx: &Sender<Msg>) ->
         let mut h = blake3::Hasher::new();
         io::copy(&mut (&mut f).take(off), &mut h)?;
         let want = e.size - off;
-        let sent = pump(
-            &mut HashRead {
-                r: (&mut f).take(want),
-                h: &mut h,
-            },
-            rd.get_mut(),
-            id,
-            done + off,
-            total,
-            tx,
-        )?;
+        let src = &mut HashRead {
+            r: (&mut f).take(want),
+            h: &mut h,
+        };
+        let sent = if zip {
+            let mut enc = zstd::Encoder::new(rd.get_mut(), 3)?;
+            let n = pump(src, &mut enc, id, done + off, total, tx)?;
+            enc.finish()?;
+            n
+        } else {
+            pump(src, rd.get_mut(), id, done + off, total, tx)?
+        };
         if sent != want {
             return Err(io::Error::other(format!("{} mudou durante o envio", e.rel)));
         }

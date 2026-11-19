@@ -17,6 +17,7 @@ if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 snow = "0.10.0"
 socket2 = { version = "0.6.5", features = ["all"] }
+zstd = "0.14.4"
 
 # só para forçar X11 no Linux: o backend Wayland do winit 0.30 não entrega arquivos arrastados
 [target.'cfg(target_os = "linux")'.dependencies]
