@@ -12,7 +12,9 @@ fn err(e: impl std::fmt::Display) -> io::Error {
 }
 
 pub fn generate() -> ([u8; 32], [u8; 32]) {
-    let k = Builder::new(PARAMS.parse().unwrap()).generate_keypair().expect("sem fonte de aleatoriedade");
+    let k = Builder::new(PARAMS.parse().unwrap())
+        .generate_keypair()
+        .expect("sem fonte de aleatoriedade");
     (k.private.try_into().unwrap(), k.public.try_into().unwrap())
 }
 
@@ -23,7 +25,10 @@ pub fn id_of(public: &[u8]) -> u128 {
 pub fn code(a: u128, b: u128) -> String {
     let (lo, hi) = (a.min(b), a.max(b));
     let h = blake3::hash(&[lo.to_be_bytes(), hi.to_be_bytes()].concat());
-    format!("{:04}", u32::from_be_bytes(h.as_bytes()[..4].try_into().unwrap()) % 10_000)
+    format!(
+        "{:04}",
+        u32::from_be_bytes(h.as_bytes()[..4].try_into().unwrap()) % 10_000
+    )
 }
 
 fn write_frame(t: &mut TcpStream, d: &[u8]) -> io::Result<()> {
@@ -57,8 +62,15 @@ impl Secure {
 }
 
 pub fn handshake(mut tcp: TcpStream, key: &[u8; 32], initiator: bool) -> io::Result<Secure> {
-    let b = Builder::new(PARAMS.parse().unwrap()).local_private_key(key).map_err(err)?;
-    let mut hs = if initiator { b.build_initiator() } else { b.build_responder() }.map_err(err)?;
+    let b = Builder::new(PARAMS.parse().unwrap())
+        .local_private_key(key)
+        .map_err(err)?;
+    let mut hs = if initiator {
+        b.build_initiator()
+    } else {
+        b.build_responder()
+    }
+    .map_err(err)?;
     let mut buf = vec![0u8; 65535];
     while !hs.is_handshake_finished() {
         if hs.is_my_turn() {
@@ -69,14 +81,25 @@ pub fn handshake(mut tcp: TcpStream, key: &[u8; 32], initiator: bool) -> io::Res
             hs.read_message(&f, &mut buf).map_err(err)?;
         }
     }
-    let remote = id_of(hs.get_remote_static().ok_or_else(|| err("sem identidade"))?);
-    Ok(Secure { tcp, ts: hs.into_transport_mode().map_err(err)?, rbuf: vec![], rpos: 0, remote })
+    let remote = id_of(
+        hs.get_remote_static()
+            .ok_or_else(|| err("sem identidade"))?,
+    );
+    Ok(Secure {
+        tcp,
+        ts: hs.into_transport_mode().map_err(err)?,
+        rbuf: vec![],
+        rpos: 0,
+        remote,
+    })
 }
 
 impl Read for Secure {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         while self.rpos >= self.rbuf.len() {
-            let Some(f) = read_frame(&mut self.tcp)? else { return Ok(0) };
+            let Some(f) = read_frame(&mut self.tcp)? else {
+                return Ok(0);
+            };
             self.rbuf = vec![0u8; f.len()];
             let n = self.ts.read_message(&f, &mut self.rbuf).map_err(err)?;
             self.rbuf.truncate(n);

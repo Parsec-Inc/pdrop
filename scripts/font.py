@@ -5,6 +5,7 @@ Folha de 16 colunas, células de 6x11 px. Linha 9 da célula é a base (rows 0-8
 Cada pixel opaco vira um quadrado de 100 unidades; a largura do glifo é a última coluna usada + 1 px de respiro.
 Uso: python3 scripts/font.py   (precisa de fontTools e Pillow)
 """
+
 from pathlib import Path
 
 from fontTools.fontBuilder import FontBuilder
@@ -54,7 +55,13 @@ fb.setupGlyf(glyphs)
 fb.setupHorizontalMetrics(metrics)
 fb.setupHorizontalHeader(ascent=BASE * U, descent=-(CH - BASE) * U)
 fb.setupNameTable({"familyName": "pdrop pixel", "styleName": "Regular"})
-fb.setupOS2(sTypoAscender=BASE * U, sTypoDescender=-(CH - BASE) * U, sTypoLineGap=0, usWinAscent=BASE * U, usWinDescent=(CH - BASE) * U)
+fb.setupOS2(
+    sTypoAscender=BASE * U,
+    sTypoDescender=-(CH - BASE) * U,
+    sTypoLineGap=0,
+    usWinAscent=BASE * U,
+    usWinDescent=(CH - BASE) * U,
+)
 fb.setupPost()
 fb.save(ROOT / "assets/pdrop.ttf")
 print(f"assets/pdrop.ttf: {len(CHARS)} glifos")
