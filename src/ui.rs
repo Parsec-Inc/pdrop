@@ -372,6 +372,7 @@ enum Act {
     Vis,
     View,
     Hist,
+    More,
     Mark(bool),
     Clips,
     ClipStep(isize),
@@ -415,6 +416,7 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::Trust => app.toggle_trust(peers),
         Act::Vis => app.cycle_vis(),
         Act::View => app.cycle_view(),
+        Act::More => app.more = !app.more,
         Act::Hist => app.toggle_hist(),
         Act::Mark(all) => app.mark(peers, all),
         Act::Clips => app.toggle_clips(),
@@ -516,6 +518,7 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
             _ if k(Key::M) => Act::Vis,
             _ if k(Key::D) => Act::View,
             _ if k(Key::G) => Act::Hist,
+            _ if k(Key::O) => Act::More,
             _ if k(Key::A) => Act::Mark(i.modifiers.shift),
             _ if k(Key::P) => Act::Clips,
             _ => Act::None,
@@ -1306,23 +1309,21 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         {
             ui.label(txt(m.clone(), FG));
         } else if let Some(n) = &to {
-            ui.label(txt("selecionado", MUTED));
-            if app.marked.len() > 1 {
-                ui.label(txt(
-                    format!("(envio para {} marcados)", app.marked.len()),
-                    acc,
-                ));
-            }
             ui.label(txt(n, acc));
             if let Some(p) = peers.iter().find(|p| Some(p.id) == app.sel) {
                 ui.label(txt(
                     format!(
-                        "· código {}{}",
+                        "· {}{}{}",
                         crate::secure::code(app.uid, p.uid),
                         if app.trusted(p.uid) {
                             " · confiável"
                         } else {
                             ""
+                        },
+                        if app.marked.len() > 1 {
+                            format!(" · {} marcados", app.marked.len())
+                        } else {
+                            String::new()
                         }
                     ),
                     MUTED,
@@ -1375,15 +1376,6 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         {
             act = Act::Bridge;
         }
-        if button(ui, sp, Some(Btn::Color), "Cor", "C", true, None).clicked() {
-            act = Act::PickColor;
-        }
-        if button(ui, sp, Some(Btn::Icon), "Ícone", "I", true, None).clicked() {
-            act = Act::PickIcon;
-        }
-        if button(ui, sp, Some(Btn::Name), "Nome", "R", true, None).clicked() {
-            act = Act::OpenRename;
-        }
         let trusted = peers
             .iter()
             .any(|p| Some(p.id) == app.sel && app.trusted(p.uid));
@@ -1399,59 +1391,6 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         .clicked()
         {
             act = Act::Trust;
-        }
-        let vis = ["Visível: todos", "Visível: confiáveis", "Invisível"][app.vis() as usize];
-        if button(
-            ui,
-            sp,
-            None,
-            vis,
-            "M",
-            true,
-            (app.vis() != 0).then_some(acc),
-        )
-        .clicked()
-        {
-            act = Act::Vis;
-        }
-        if button(
-            ui,
-            sp,
-            None,
-            &format!("Visão: {}", crate::VIEWS[app.view as usize]),
-            "D",
-            true,
-            None,
-        )
-        .clicked()
-        {
-            act = Act::View;
-        }
-        if button(
-            ui,
-            sp,
-            None,
-            "Histórico",
-            "G",
-            true,
-            app.hist_sel.is_some().then_some(acc),
-        )
-        .clicked()
-        {
-            act = Act::Hist;
-        }
-        if button(
-            ui,
-            sp,
-            None,
-            "Clipboards",
-            "P",
-            true,
-            app.clip_sel.is_some().then_some(acc),
-        )
-        .clicked()
-        {
-            act = Act::Clips;
         }
         if app.clip_sel.is_some()
             && button(
@@ -1509,7 +1448,79 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         {
             act = Act::CutBridges;
         }
+        if button(ui, sp, None, "Opções", "O", true, app.more.then_some(acc)).clicked() {
+            act = Act::More;
+        }
     });
+    if app.more || app.hist_sel.is_some() || app.clip_sel.is_some() {
+        ui.add_space(3.0 * S);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0 * S, 3.0 * S);
+            let sp = &app.sp;
+            if button(ui, sp, Some(Btn::Color), "Cor", "C", true, None).clicked() {
+                act = Act::PickColor;
+            }
+            if button(ui, sp, Some(Btn::Icon), "Ícone", "I", true, None).clicked() {
+                act = Act::PickIcon;
+            }
+            if button(ui, sp, Some(Btn::Name), "Nome", "R", true, None).clicked() {
+                act = Act::OpenRename;
+            }
+            let vis = ["Visível: todos", "Visível: confiáveis", "Invisível"][app.vis() as usize];
+            if button(
+                ui,
+                sp,
+                None,
+                vis,
+                "M",
+                true,
+                (app.vis() != 0).then_some(acc),
+            )
+            .clicked()
+            {
+                act = Act::Vis;
+            }
+            if button(
+                ui,
+                sp,
+                None,
+                &format!("Visão: {}", crate::VIEWS[app.view as usize]),
+                "D",
+                true,
+                None,
+            )
+            .clicked()
+            {
+                act = Act::View;
+            }
+            if button(
+                ui,
+                sp,
+                None,
+                "Histórico",
+                "G",
+                true,
+                app.hist_sel.is_some().then_some(acc),
+            )
+            .clicked()
+            {
+                act = Act::Hist;
+            }
+            if button(
+                ui,
+                sp,
+                None,
+                "Clipboards",
+                "P",
+                true,
+                app.clip_sel.is_some().then_some(acc),
+            )
+            .clicked()
+            {
+                act = Act::Clips;
+            }
+        });
+    }
     apply(app, act, peers);
 }
 
