@@ -76,6 +76,7 @@ pub struct Transfer {
     pub note: String,
     pub src: String,
     pub uid: u128,
+    pub t0: Option<(Instant, u64)>,
 }
 
 pub type Grants = Arc<Mutex<HashMap<u128, String>>>;
@@ -296,7 +297,7 @@ fn recv(s: TcpStream, tx: &Sender<Msg>, dir: &Path, grants: &Grants, policy: &Po
     let name = if name.is_empty() { "arquivo".to_string() } else { name };
     let note = if clip { raw.chars().filter(|c| !c.is_control()).take(60).collect() } else { String::new() };
     let t_peer = clean(from);
-    let mut t = Transfer { id, peer: t_peer.clone(), label: name, size, done: 0, up: false, state: State::Waiting, kind, note, src: String::new(), uid };
+    let mut t = Transfer { id, peer: t_peer.clone(), label: name, size, done: 0, up: false, state: State::Waiting, kind, note, src: String::new(), uid, t0: None };
     let granted = kind == 'b' && grants.lock().unwrap().contains_key(&uid);
     let auto = kind == 't' && policy.trust.lock().unwrap().contains_key(&uid);
     let ok = granted || auto || {
@@ -531,7 +532,7 @@ enum Job {
 pub fn send(to: Peer, me: Who, inputs: Vec<String>, tx: Sender<Msg>) {
     let id = next_id();
     thread::spawn(move || {
-        let mut t = Transfer { id, peer: to.name.clone(), label: String::new(), size: 0, done: 0, up: true, state: State::Waiting, kind: 'f', note: String::new(), src: inputs.join("\n"), uid: to.uid };
+        let mut t = Transfer { id, peer: to.name.clone(), label: String::new(), size: 0, done: 0, up: true, state: State::Waiting, kind: 'f', note: String::new(), src: inputs.join("\n"), uid: to.uid, t0: None };
         match prepare(&inputs) {
             Err(e) => {
                 t.label = inputs.join(" ").trim().chars().take(40).collect();
@@ -573,7 +574,7 @@ pub fn push_clip(to: &Peer, me: &Who, c: &clip::Clip, kind: char, tx: &Sender<Ms
     let id = next_id();
     let note = preview(c);
     let size = c.data.len() as u64;
-    let t = Transfer { id, peer: to.name.clone(), label: "clipboard".into(), size, done: 0, up: true, state: State::Waiting, kind, note: note.clone(), src: note.clone(), uid: to.uid };
+    let t = Transfer { id, peer: to.name.clone(), label: "clipboard".into(), size, done: 0, up: true, state: State::Waiting, kind, note: note.clone(), src: note.clone(), uid: to.uid, t0: None };
     tx.send(Msg::Start(t)).ok();
     let r = if size > clip::MAX {
         Err(io::Error::other("clipboard grande demais"))

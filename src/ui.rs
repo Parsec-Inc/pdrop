@@ -38,6 +38,10 @@ fn txt(s: impl Into<String>, col: Rgb) -> RichText {
     RichText::new(s).color(c(col))
 }
 
+fn eta(s: u64) -> String {
+    if s >= 3600 { format!("{}h{:02}m", s / 3600, s % 3600 / 60) } else if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s}s") }
+}
+
 pub fn human(n: u64) -> String {
     let (mut v, mut i) = (n as f64, 0);
     while v >= 1024.0 && i < 4 {
@@ -687,7 +691,9 @@ fn transfers(ui: &mut egui::Ui, app: &App) {
                                 let b = Rect::from_min_size(o + vec2(i as f32 * 5.0 * S, 0.0), vec2(4.0 * S, 4.0 * S));
                                 ui.painter().rect_filled(b, 0.0, if i < lit { c(acc) } else { c(GRID) });
                             }
-                            ui.label(txt(format!("{:>3}%  {}", (fr * 100.0) as u32, human(t.size)), MUTED));
+                            let rate = t.t0.map_or(0.0, |(t0, d0)| t.done.saturating_sub(d0) as f64 / t0.elapsed().as_secs_f64().max(0.001));
+                            let eta = if rate > 1.0 { format!("  ·  {}/s  ·  {}", human(rate as u64), eta((t.size.saturating_sub(t.done) as f64 / rate) as u64)) } else { String::new() };
+                            ui.label(txt(format!("{:>3}%  {}{eta}", (fr * 100.0) as u32, human(t.size)), MUTED));
                         }
                         State::Done(m) => {
                             let pre = if !t.up && t.kind == 'f' { "salvo em " } else { "" };
