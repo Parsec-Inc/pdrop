@@ -52,6 +52,7 @@ pub struct App {
     pub marked: std::collections::HashSet<u64>,
     pub view: u8,
     pub cols: usize,
+    pub more: bool,
 }
 
 #[derive(Clone)]
@@ -1038,6 +1039,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|v| (*v as usize) < VIEWS.len())
                     .unwrap_or(0),
                 cols: 1,
+                more: false,
             }))
         }),
     )?;
