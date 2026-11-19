@@ -33,7 +33,8 @@ enum Tool {
 }
 
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
 fn tool() -> Option<Tool> {
@@ -64,9 +65,19 @@ pub fn quiet(c: &mut Command) -> &mut Command {
 }
 
 fn read(cmd: &[&str]) -> Option<Vec<u8>> {
-    let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..])).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..]))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
     let mut buf = Vec::new();
-    child.stdout.take()?.take(MAX + 1).read_to_end(&mut buf).ok()?;
+    child
+        .stdout
+        .take()?
+        .take(MAX + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
     if buf.len() as u64 > MAX {
         let _ = child.kill();
         let _ = child.wait();
@@ -76,7 +87,11 @@ fn read(cmd: &[&str]) -> Option<Vec<u8>> {
 }
 
 fn pick(types: &str) -> Option<String> {
-    let ts: Vec<&str> = types.lines().map(str::trim).filter(|t| !t.is_empty()).collect();
+    let ts: Vec<&str> = types
+        .lines()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
     let has = |t: &str| ts.contains(&t);
     if has("image/png") {
         return Some("image/png".into());
@@ -84,22 +99,72 @@ fn pick(types: &str) -> Option<String> {
     if let Some(t) = ts.iter().find(|t| t.starts_with("image/")) {
         return Some(t.to_string());
     }
-    [TEXT, "UTF8_STRING", "text/plain", "STRING", "TEXT"].into_iter().find(|t| has(t)).map(|t| if t == "UTF8_STRING" { TEXT.into() } else { t.into() })
+    [TEXT, "UTF8_STRING", "text/plain", "STRING", "TEXT"]
+        .into_iter()
+        .find(|t| has(t))
+        .map(|t| {
+            if t == "UTF8_STRING" {
+                TEXT.into()
+            } else {
+                t.into()
+            }
+        })
+}
+
+fn win_image() -> Option<Vec<u8>> {
+    let png = read(&[
+        "powershell.exe",
+        "-NoProfile",
+        "-Sta",
+        "-Command",
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[Windows.Forms.Clipboard]::GetImage(); if($i){ $m=New-Object IO.MemoryStream; $i.Save($m,[Drawing.Imaging.ImageFormat]::Png); $b=$m.ToArray(); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length) }",
+    ])?;
+    (!png.is_empty()).then_some(png)
 }
 
 pub fn get() -> Option<Clip> {
     let t = tool()?;
+    if t == Tool::Win
+        && let Some(data) = win_image()
+    {
+        return Some(Clip {
+            mime: "image/png".into(),
+            data,
+        });
+    }
     let mime = match t {
-        Tool::Wl => pick(&String::from_utf8_lossy(&read(&["wl-paste", "--list-types"])?))?,
-        Tool::Xclip => pick(&String::from_utf8_lossy(&read(&["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])?))?,
+        Tool::Wl => pick(&String::from_utf8_lossy(&read(&[
+            "wl-paste",
+            "--list-types",
+        ])?))?,
+        Tool::Xclip => pick(&String::from_utf8_lossy(&read(&[
+            "xclip",
+            "-selection",
+            "clipboard",
+            "-t",
+            "TARGETS",
+            "-o",
+        ])?))?,
         _ => TEXT.into(),
     };
     let data = match t {
         Tool::Wl => read(&["wl-paste", "-n", "-t", &mime])?,
-        Tool::Xclip => read(&["xclip", "-selection", "clipboard", "-t", if mime == TEXT { "UTF8_STRING" } else { &mime }, "-o"])?,
+        Tool::Xclip => read(&[
+            "xclip",
+            "-selection",
+            "clipboard",
+            "-t",
+            if mime == TEXT { "UTF8_STRING" } else { &mime },
+            "-o",
+        ])?,
         Tool::Xsel => read(&["xsel", "-ob"])?,
         Tool::Mac => read(&["pbpaste"])?,
-        Tool::Win => read(&["powershell.exe", "-NoProfile", "-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"])?,
+        Tool::Win => read(&[
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw",
+        ])?,
     };
     Some(Clip { mime, data })
 }
@@ -112,13 +177,33 @@ pub fn set(c: &Clip) -> io::Result<()> {
         Tool::Wl => vec!["wl-copy", "-t", &c.mime],
         Tool::Xclip if text => vec!["xclip", "-selection", "clipboard", "-i"],
         Tool::Xclip => vec!["xclip", "-selection", "clipboard", "-t", &c.mime, "-i"],
-        _ if !text => return Err(io::Error::other("este sistema só recebe texto no clipboard")),
+        Tool::Win if !text => vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Sta",
+            "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $m=New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); [Windows.Forms.Clipboard]::SetImage([Drawing.Image]::FromStream($m))",
+        ],
+        _ if !text => {
+            return Err(io::Error::other(
+                "este sistema só recebe texto no clipboard",
+            ));
+        }
         Tool::Xsel => vec!["xsel", "-ib"],
         Tool::Mac => vec!["pbcopy"],
-        Tool::Win => vec!["powershell.exe", "-NoProfile", "-Command", "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+        Tool::Win => vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+        ],
     };
     *LAST.lock().unwrap() = Some(c.clone());
-    let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..])).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    let mut child = quiet(Command::new(cmd[0]).args(&cmd[1..]))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
     child.stdin.take().unwrap().write_all(&c.data)?;
     if !child.wait()?.success() {
         return Err(io::Error::other(format!("{} falhou", cmd[0])));
@@ -132,7 +217,9 @@ pub fn mark_current() {
 
 pub fn changed(cur: &Clip) -> bool {
     let mut l = LAST.lock().unwrap();
-    (l.as_ref() != Some(cur)).then(|| *l = Some(cur.clone())).is_some()
+    (l.as_ref() != Some(cur))
+        .then(|| *l = Some(cur.clone()))
+        .is_some()
 }
 
 #[cfg(test)]
@@ -141,7 +228,10 @@ mod tests {
 
     #[test]
     fn pick_prefers_image_then_text() {
-        assert_eq!(pick("text/html\nimage/png\ntext/plain").as_deref(), Some("image/png"));
+        assert_eq!(
+            pick("text/html\nimage/png\ntext/plain").as_deref(),
+            Some("image/png")
+        );
         assert_eq!(pick("image/jpeg\nTEXT").as_deref(), Some("image/jpeg"));
         assert_eq!(pick("TARGETS\nUTF8_STRING\nSTRING").as_deref(), Some(TEXT));
         assert_eq!(pick("text/html\ntext/plain").as_deref(), Some("text/plain"));
