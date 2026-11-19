@@ -1,3 +1,15 @@
+## v1.2.0 (2026-11-19)
+
+### Feat
+
+- zstd compression over transfer
+- added speed and ETA transfer data
+
+### Fix
+
+- merge conflict
+- windows clipboard support patched
+
 ## v1.1.0 (2026-11-18)
 
 ### Feat
