@@ -9,7 +9,7 @@ license=('MIT')
 # a janela carrega estas bibliotecas em runtime
 depends=('gcc-libs' 'libxkbcommon' 'wayland' 'libx11' 'vulkan-icd-loader')
 makedepends=('cargo')
-options=('!debug')  # o binário já sai strip do Cargo.toml
+options=('!debug' '!lto')
 optdepends=('wl-clipboard: clipboard e ponte no Wayland'
             'xclip: clipboard e ponte no X11'
             'libnotify: aviso de arquivo recebido')
