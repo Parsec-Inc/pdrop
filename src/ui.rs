@@ -454,10 +454,8 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
 
 fn keys(ctx: &egui::Context, app: &App) -> Act {
     let typing = ctx.text_edit_focused();
-    if !typing {
-        if let Some(id) = ctx.memory(|m| m.focused()) {
-            ctx.memory_mut(|m| m.surrender_focus(id));
-        }
+    if !typing && let Some(id) = ctx.memory(|m| m.focused()) {
+        ctx.memory_mut(|m| m.surrender_focus(id));
     }
     ctx.input(|i| {
         if i.key_pressed(Key::Escape) {
@@ -729,16 +727,16 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         .filter(|x| matches!(x.state, State::Waiting | State::Active))
         .collect();
 
-    if resp.clicked() {
-        if let Some(m) = resp.interact_pointer_pos() {
-            let hit = peers
-                .iter()
-                .map(|q| (q, scr(place(q)).distance(m)))
-                .filter(|(_, d)| *d < 34.0)
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((q, _)) = hit {
-                app.sel = Some(q.id);
-            }
+    if resp.clicked()
+        && let Some(m) = resp.interact_pointer_pos()
+    {
+        let hit = peers
+            .iter()
+            .map(|q| (q, scr(place(q)).distance(m)))
+            .filter(|(_, d)| *d < 34.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((q, _)) = hit {
+            app.sel = Some(q.id);
         }
     }
 
@@ -1244,10 +1242,9 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 format!("{} · ←→ enter esc", ICONS[app.pick_icon.unwrap() as usize]),
                 DIM,
             ));
-        } else if app.rename.is_some() {
+        } else if let Some(buf) = app.rename.as_mut() {
             ui.label(txt("seu nome ›", acc));
             let focus = std::mem::take(&mut app.focus);
-            let buf = app.rename.as_mut().unwrap();
             let r = well(
                 ui,
                 &app.sp,
@@ -1284,6 +1281,7 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                 acc,
             ));
             let focus = std::mem::take(&mut app.focus);
+            #[allow(clippy::unnecessary_unwrap)]
             let buf = app.input.as_mut().unwrap();
             let r = well(
                 ui,

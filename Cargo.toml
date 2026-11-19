@@ -1,6 +1,6 @@
 [package]
 name = "pdrop"
-version = "0.2.0"
+version = "1.1.0"
 edition = "2024"
 description = "AirDrop-style sharing of files, text and clipboard on your local network"
 license = "MIT"
