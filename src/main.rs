@@ -494,6 +494,12 @@ impl eframe::App for App {
     }
 }
 
+#[cfg(windows)]
+const WIN_TOAST: &str = "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('ToastText02');\
+$t=$x.GetElementsByTagName('text');$t[0].AppendChild($x.CreateTextNode('pdrop'))|Out-Null;$t[1].AppendChild($x.CreateTextNode($env:PDROP_BODY))|Out-Null;\
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+
 fn notify(body: String) {
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
@@ -509,7 +515,14 @@ fn notify(body: String) {
                 &body,
             ])
             .status();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let _ = clip::quiet(
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", WIN_TOAST])
+                .env("PDROP_BODY", &body),
+        )
+        .status();
+        #[cfg(not(any(target_os = "macos", windows)))]
         let _ = std::process::Command::new("notify-send")
             .args(["-a", "pdrop", "-u", "critical", "pdrop"])
             .arg(format!(

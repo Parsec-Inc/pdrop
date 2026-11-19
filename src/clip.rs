@@ -111,8 +111,27 @@ fn pick(types: &str) -> Option<String> {
         })
 }
 
+fn win_image() -> Option<Vec<u8>> {
+    let png = read(&[
+        "powershell.exe",
+        "-NoProfile",
+        "-Sta",
+        "-Command",
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[Windows.Forms.Clipboard]::GetImage(); if($i){ $m=New-Object IO.MemoryStream; $i.Save($m,[Drawing.Imaging.ImageFormat]::Png); $b=$m.ToArray(); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length) }",
+    ])?;
+    (!png.is_empty()).then_some(png)
+}
+
 pub fn get() -> Option<Clip> {
     let t = tool()?;
+    if t == Tool::Win
+        && let Some(data) = win_image()
+    {
+        return Some(Clip {
+            mime: "image/png".into(),
+            data,
+        });
+    }
     let mime = match t {
         Tool::Wl => pick(&String::from_utf8_lossy(&read(&[
             "wl-paste",
@@ -158,6 +177,13 @@ pub fn set(c: &Clip) -> io::Result<()> {
         Tool::Wl => vec!["wl-copy", "-t", &c.mime],
         Tool::Xclip if text => vec!["xclip", "-selection", "clipboard", "-i"],
         Tool::Xclip => vec!["xclip", "-selection", "clipboard", "-t", &c.mime, "-i"],
+        Tool::Win if !text => vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Sta",
+            "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $m=New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m); [Windows.Forms.Clipboard]::SetImage([Drawing.Image]::FromStream($m))",
+        ],
         _ if !text => {
             return Err(io::Error::other(
                 "este sistema só recebe texto no clipboard",
