@@ -217,7 +217,7 @@ jobs:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
         with:
           snap: snap/${{ needs.snap.outputs.file }}
-          release: edge
+          release: stable
 
   aur:
     needs: [bump, release]

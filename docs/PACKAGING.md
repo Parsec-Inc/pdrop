@@ -61,7 +61,7 @@ Estes passos exigem contas suas; nada disso foi feito ainda.
 | **GitHub Releases** | baixar `.deb` / `.rpm` / `.msi` / `.tar.gz` | nada |
 | **dnf / COPR** | `sudo dnf copr enable parsec-inc/pdrop && sudo dnf install pdrop` | Crie o projeto em copr.fedorainfracloud.org, em *Packages > New* escolha *SCM*, repo `Parsec-Inc/pdrop`, spec `packaging/rpm/pdrop.spec`. Nas configurações do projeto, ligue **Enable internet access during builds** (o cargo baixa as dependências). Para buildar a cada tag, adicione o webhook do COPR ao GitHub. |
 | **pacman / AUR** | `yay -S pdrop` | Crie o pacote `pdrop` no AUR com a sua chave SSH. No GitHub, crie o secret `AUR_SSH_PRIVATE_KEY` e a variável `PUBLISH_AUR=true`. |
-| **snap** | `sudo snap install pdrop` | `snapcraft register pdrop`, depois `snapcraft export-login` e guarde no secret `SNAPCRAFT_STORE_CREDENTIALS`. Variável `PUBLISH_SNAP=true`. Publica no canal `edge`. |
+| **snap** | `sudo snap install pdrop` | `snapcraft register pdrop`, depois `snapcraft export-login` e guarde no secret `SNAPCRAFT_STORE_CREDENTIALS`. Variável `PUBLISH_SNAP=true`. Publica direto no canal `stable` (exporte a credencial com `--channels stable`). |
 | **brew** | `brew install Parsec-Inc/tap/pdrop` | Crie o repo `Parsec-Inc/homebrew-tap`, copie `packaging/homebrew/pdrop.rb` para `Formula/pdrop.rb` (com o `sha256` real). Secret `HOMEBREW_TAP_TOKEN` (PAT com escrita no tap) e variável `PUBLISH_BREW=true`. |
 | **apt** | `sudo apt install ./pdrop_*.deb` | Um repositório apt de verdade (PPA, ou um repo estático no GitHub Pages) não está montado. Por enquanto o `.deb` vem da release. |
 | **msi** | duplo clique | Sem assinatura de código: o Windows SmartScreen vai avisar. |
