@@ -1,3 +1,10 @@
+## v1.2.2 (2026-11-23)
+
+### Fix
+
+- toast diagnostics
+- added accept and refuse toast options
+
 ## v1.2.1 (2026-11-19)
 
 ### Fix

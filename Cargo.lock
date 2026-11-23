@@ -2588,7 +2588,7 @@ checksum = "73072a9470554c8e794778acece2312661218aaabb635600957d952cf01c716e"
 
 [[package]]
 name = "pdrop"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "blake3",
  "eframe",
