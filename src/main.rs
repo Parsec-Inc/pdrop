@@ -321,13 +321,16 @@ impl App {
                 self.flash("ponte encerrada");
             }
             Msg::Ask(t, r) => {
-                notify(format!(
-                    "{} quer enviar {} ({})",
-                    t.peer,
-                    t.label,
-                    ui::human(t.size)
-                ));
+                notify(
+                    format!("{} quer enviar {} ({})", t.peer, t.label, ui::human(t.size)),
+                    Some((t.id, self.tx.clone())),
+                );
                 self.pending.push_back((t, r));
+            }
+            Msg::Reply(id, yes) => {
+                if let Some(i) = self.pending.iter().position(|(t, _)| t.id == id) {
+                    self.pending.remove(i).map(|(_, r)| r.send(yes).ok());
+                }
             }
             Msg::Clip(from, c) => {
                 if self.clips.front().is_none_or(|(_, f)| f.data != c.data) {
@@ -346,7 +349,7 @@ impl App {
                 }
             }
             Msg::Auto(t) => {
-                notify(format!("{} enviou uma mensagem", t.peer));
+                notify(format!("{} enviou uma mensagem", t.peer), None);
                 self.flash(format!("mensagem de {} (confiável)", t.peer));
             }
             Msg::Start(t) => {
@@ -501,33 +504,76 @@ $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('Toas
 $t=$x.GetElementsByTagName('text');$t[0].AppendChild($x.CreateTextNode('pdrop'))|Out-Null;$t[1].AppendChild($x.CreateTextNode($env:PDROP_BODY))|Out-Null;\
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
 
-fn notify(body: String) {
+#[cfg(windows)]
+const WIN_ASK: &str = "Add-Type -AssemblyName System.Windows.Forms;\
+$f=New-Object Windows.Forms.Form -Property @{TopMost=$true};\
+[Windows.Forms.MessageBox]::Show($f,$env:PDROP_BODY,'pdrop','YesNo','Question')";
+
+fn notify(body: String, ask: Option<(u64, Sender<Msg>)>) {
     std::thread::spawn(move || {
+        let reply = |yes: Option<bool>| {
+            if let (Some((id, tx)), Some(y)) = (&ask, yes) {
+                tx.send(Msg::Reply(*id, y)).ok();
+            }
+        };
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "on run {t, b}",
-                "-e",
-                "display notification b with title t sound name \"Ping\"",
-                "-e",
-                "end run",
-                "pdrop",
-                &body,
-            ])
-            .status();
+        {
+            let o = std::process::Command::new("osascript")
+                .args([
+                    "-e", "on run {t, b}",
+                    "-e", "beep",
+                    "-e", if ask.is_some() {
+                        "display dialog b with title t buttons {\"Recusar\", \"Aceitar\"} default button \"Aceitar\" giving up after 120"
+                    } else {
+                        "display notification b with title t sound name \"Ping\""
+                    },
+                    "-e", "end run",
+                    "pdrop", &body,
+                ])
+                .output();
+            if let Ok(o) = o {
+                let out = String::from_utf8_lossy(&o.stdout);
+                reply(
+                    out.contains("button returned:Aceitar")
+                        .then_some(true)
+                        .or(out.contains("button returned:Recusar").then_some(false)),
+                );
+            }
+        }
         #[cfg(windows)]
-        let _ = clip::quiet(
-            std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", WIN_TOAST])
-                .env("PDROP_BODY", &body),
-        )
-        .status();
+        {
+            let script = if ask.is_some() { WIN_ASK } else { WIN_TOAST };
+            let o = clip::quiet(
+                std::process::Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                    .env("PDROP_BODY", &body),
+            )
+            .output();
+            if let Ok(o) = o {
+                let out = String::from_utf8_lossy(&o.stdout);
+                reply(
+                    out.contains("Yes")
+                        .then_some(true)
+                        .or(out.contains("No").then_some(false)),
+                );
+            }
+        }
         #[cfg(not(any(target_os = "macos", windows)))]
-        let _ = std::process::Command::new("notify-send")
-            .args(["-a", "pdrop", "-u", "critical", "pdrop"])
-            .arg(body.replace('&', "&amp;").replace('<', "&lt;"))
-            .status();
+        {
+            let mut c = std::process::Command::new("notify-send");
+            c.args(["-a", "pdrop", "-u", "critical"]);
+            if ask.is_some() {
+                c.args(["-w", "-A", "y=Aceitar", "-A", "n=Recusar"]);
+            }
+            c.args(["pdrop", &body.replace('&', "&amp;").replace('<', "&lt;")]);
+            if let Ok(o) = c.output() {
+                match String::from_utf8_lossy(&o.stdout).trim() {
+                    "y" => reply(Some(true)),
+                    "n" => reply(Some(false)),
+                    _ => {}
+                }
+            }
+        }
     });
 }
 
