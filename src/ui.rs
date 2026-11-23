@@ -355,7 +355,7 @@ fn pixel_frame(m: f32) -> egui::Frame {
 
 enum Act {
     None,
-    Answer(bool),
+    Answer(u64, bool),
     Step(isize),
     OpenInput,
     Send,
@@ -388,7 +388,7 @@ enum Act {
 fn apply(app: &mut App, a: Act, peers: &[Peer]) {
     match a {
         Act::None => {}
-        Act::Answer(y) => app.answer(y),
+        Act::Answer(id, y) => app.answer(id, y),
         Act::Step(d) => {
             let i = peers
                 .iter()
@@ -473,8 +473,8 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
         if k(Key::Q) || i.events.iter().any(|e| matches!(e, egui::Event::Copy)) {
             return Act::Quit;
         }
-        if !app.pending.is_empty() && (k(Key::Y) || k(Key::N)) {
-            return Act::Answer(k(Key::Y));
+        if let Some((t, _)) = app.pending.front().filter(|_| k(Key::Y) || k(Key::N)) {
+            return Act::Answer(t.id, k(Key::Y));
         }
         if let Some(v) = app.pick.or(app.pick_icon) {
             return match () {
@@ -1180,10 +1180,10 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if button(ui, &app.sp, None, "Recusar", "N", true, None).clicked() {
-                    act = Act::Answer(false);
+                    act = Act::Answer(t.id, false);
                 }
                 if button(ui, &app.sp, None, "Aceitar", "Y", true, Some(WARN)).clicked() {
-                    act = Act::Answer(true);
+                    act = Act::Answer(t.id, true);
                 }
             });
         } else if app.pick.is_some() {
