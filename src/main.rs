@@ -25,6 +25,7 @@ pub struct App {
     pub input: Option<String>,
     pub xfers: Vec<Transfer>,
     pub pending: VecDeque<(Transfer, Sender<bool>)>,
+    prompts: std::collections::HashMap<u64, Arc<AtomicBool>>,
     pub anim: f64,
     pub last: Instant,
     pub calm: bool,
@@ -300,9 +301,15 @@ impl App {
         self.bridge = Some((p.id, p.name, stop));
     }
 
-    fn answer(&mut self, yes: bool) {
-        if let Some((_, r)) = self.pending.pop_front() {
-            r.send(yes).ok();
+    // Responde só o pedido `id`; se já foi resolvido (ex.: pela notificação), ignora.
+    fn answer(&mut self, id: u64, yes: bool) {
+        if let Some(i) = self.pending.iter().position(|(t, _)| t.id == id) {
+            if let Some((_, r)) = self.pending.remove(i) {
+                r.send(yes).ok();
+            }
+            if let Some(c) = self.prompts.remove(&id) {
+                c.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -321,13 +328,20 @@ impl App {
                 self.flash("ponte encerrada");
             }
             Msg::Ask(t, r) => {
-                notify(format!(
-                    "{} quer enviar {} ({})",
-                    t.peer,
-                    t.label,
-                    ui::human(t.size)
-                ));
+                let what = match t.kind {
+                    'c' => format!("quer colar no seu clipboard: {}", t.note),
+                    'b' => "quer ligar uma ponte de clipboard: tudo que copiar vai para o seu, até você desligar".into(),
+                    _ => format!("quer enviar {} ({})", t.label, ui::human(t.size)),
+                };
+                let c = notify(
+                    format!("{} [{}] {what}", t.peer, secure::code(self.uid, t.uid)),
+                    Some((t.id, self.tx.clone())),
+                );
+                self.prompts.insert(t.id, c);
                 self.pending.push_back((t, r));
+            }
+            Msg::Reply(id, yes) => {
+                self.answer(id, yes);
             }
             Msg::Clip(from, c) => {
                 if self.clips.front().is_none_or(|(_, f)| f.data != c.data) {
@@ -346,7 +360,7 @@ impl App {
                 }
             }
             Msg::Auto(t) => {
-                notify(format!("{} enviou uma mensagem", t.peer));
+                notify(format!("{} enviou uma mensagem", t.peer), None);
                 self.flash(format!("mensagem de {} (confiável)", t.peer));
             }
             Msg::Start(t) => {
@@ -501,34 +515,95 @@ $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('Toas
 $t=$x.GetElementsByTagName('text');$t[0].AppendChild($x.CreateTextNode('pdrop'))|Out-Null;$t[1].AppendChild($x.CreateTextNode($env:PDROP_BODY))|Out-Null;\
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
 
-fn notify(body: String) {
+#[cfg(windows)]
+const WIN_ASK: &str = "Add-Type -AssemblyName System.Windows.Forms;\
+$f=New-Object Windows.Forms.Form -Property @{TopMost=$true};\
+[Windows.Forms.MessageBox]::Show($f,$env:PDROP_BODY,'pdrop','YesNo','Question','Button2')";
+
+// Devolve um flag: ligue-o para fechar o prompt (pedido já respondido no app).
+fn notify(body: String, ask: Option<(u64, Sender<Msg>)>) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
     std::thread::spawn(move || {
+        use std::io::Read;
+        let asking = ask.is_some();
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "on run {t, b}",
-                "-e",
-                "display notification b with title t sound name \"Ping\"",
-                "-e",
-                "end run",
-                "pdrop",
-                &body,
-            ])
-            .status();
+        let (mut c, parse) = {
+            let mut c = std::process::Command::new("osascript");
+            c.args(["-e", "on run {t, b}"]);
+            if asking {
+                c.args(["-e", "beep", "-e", "display dialog b with title t buttons {\"Recusar\", \"Aceitar\"} default button \"Recusar\" giving up after 120"]);
+            } else {
+                c.args([
+                    "-e",
+                    "display notification b with title t sound name \"Ping\"",
+                ]);
+            }
+            c.args(["-e", "end run", "pdrop", &body]);
+            (
+                c,
+                (|o: &str| {
+                    o.contains("button returned:Aceitar")
+                        .then_some(true)
+                        .or(o.contains("button returned:Recusar").then_some(false))
+                }) as fn(&str) -> Option<bool>,
+            )
+        };
         #[cfg(windows)]
-        let _ = clip::quiet(
-            std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", WIN_TOAST])
-                .env("PDROP_BODY", &body),
-        )
-        .status();
+        let (mut c, parse) = {
+            let mut c = std::process::Command::new("powershell.exe");
+            clip::quiet(c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                if asking { WIN_ASK } else { WIN_TOAST },
+            ]))
+            .env("PDROP_BODY", &body);
+            (
+                c,
+                (|o: &str| {
+                    o.contains("Yes")
+                        .then_some(true)
+                        .or(o.contains("No").then_some(false))
+                }) as fn(&str) -> Option<bool>,
+            )
+        };
         #[cfg(not(any(target_os = "macos", windows)))]
-        let _ = std::process::Command::new("notify-send")
-            .args(["-a", "pdrop", "-u", "critical", "pdrop"])
-            .arg(body.replace('&', "&amp;").replace('<', "&lt;"))
-            .status();
+        let (mut c, parse) = {
+            let mut c = std::process::Command::new("notify-send");
+            c.args(["-a", "pdrop", "-u", "critical"]);
+            if asking {
+                c.args(["-w", "-A", "y=Aceitar", "-A", "n=Recusar"]);
+            }
+            c.args(["pdrop", &body.replace('&', "&amp;").replace('<', "&lt;")]);
+            (
+                c,
+                (|o: &str| match o.trim() {
+                    "y" => Some(true),
+                    "n" => Some(false),
+                    _ => None,
+                }) as fn(&str) -> Option<bool>,
+            )
+        };
+        let Ok(mut ch) = c.stdout(std::process::Stdio::piped()).spawn() else {
+            return;
+        };
+        while ch.try_wait().ok().flatten().is_none() {
+            if stop.load(Ordering::Relaxed) {
+                ch.kill().ok();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let mut out = String::new();
+        if let Some(mut so) = ch.stdout.take() {
+            so.read_to_string(&mut out).ok();
+        }
+        if let (Some((id, tx)), Some(y)) = (ask, parse(&out)) {
+            tx.send(Msg::Reply(id, y)).ok();
+        }
     });
+    cancel
 }
 
 const NAME_MAX: usize = 32;
@@ -1009,6 +1084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input: None,
                 xfers: vec![],
                 pending: VecDeque::new(),
+                prompts: Default::default(),
                 anim: 0.0,
                 last: Instant::now(),
                 calm,

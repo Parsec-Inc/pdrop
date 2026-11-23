@@ -86,6 +86,7 @@ pub enum Msg {
     Auto(Transfer),
     Clip(String, clip::Clip),
     Ask(Transfer, Sender<bool>),
+    Reply(u64, bool),
     Start(Transfer),
     Progress(u64, u64),
     End(u64, Result<String, String>),
