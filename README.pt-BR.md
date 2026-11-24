@@ -217,6 +217,35 @@ Tudo é ponto a ponto na rede local; não existe servidor em lugar nenhum.
 | A ponte de clipboard para sozinha | É de propósito quando o peer recusa, desconecta ou sai — o cabeçalho avisa *ponte encerrada*. |
 | Duas instâncias na mesma máquina | Funciona no Linux (SO_REUSEPORT); elas se enxergam. |
 
+## Relay (`pdrop-relay`)
+
+O `pdrop-relay` é um servidor pequeno para conectar aparelhos que não estão na mesma rede. Não tem contas nem lista global de aparelhos: uma **sala** é o `blake3` de um segredo que só os membros conhecem (64 hex), e cada aparelho só enxerga quem está na mesma sala. Use um segredo aleatório (128 bits ou mais); uma frase curta escolhida por uma pessoa pode ser adivinhada. O conteúdo continua cifrado ponta a ponta (Noise): o relay repassa bytes e só vê quem fala com quem e o volume. O lado do cliente (`--relay`, `--room`) ainda não está ligado ao app.
+
+```bash
+cargo build --release --bin pdrop-relay
+pdrop-relay --listen 0.0.0.0:443     # padrão
+```
+
+**Protocolo** — uma linha por mensagem, terminada em `\n`:
+
+| Mensagem | Significado |
+|----------|-------------|
+| `HELLO <sala> <uid>` | Conexão de controle. O relay responde `OK` (ou fecha). |
+| `BEACON <texto>` | Cliente → relay, a cada poucos segundos. Mais de 30 s de silêncio derruba o membro. |
+| `BEACON <uid> <texto>`, `GONE <uid>`, `INCOMING <token>` | Relay → cliente: presença de outro membro, um membro saiu, alguém quer conectar. |
+| `DIAL <sala> <uid_alvo>` | Nova conexão pedindo um túnel até um membro. `OK` (daí em diante, bytes crus) ou `ERR`. |
+| `ACCEPT <sala> <uid> <token>` | Resposta do alvo ao `INCOMING`, em uma nova conexão. `OK`, e o mesmo túnel. |
+
+**Limites** — 32 conexões por IP, 32 membros por sala, 1024 salas, 30 requisições por minuto por IP, 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Ids de sala nunca são registrados em log.
+
+**Atalhos conhecidos**
+- Um uid repetido na sala substitui o antigo (para a reconexão funcionar). Um membro pode derrubar outro com um uid forjado, mas não consegue sequestrar uma transferência: o handshake Noise confere o uid.
+- Atrás de um NAT compartilhado, os usuários dividem o limite de requisições por IP.
+- Sem TLS entre cliente e relay: o conteúdo já é cifrado, mas o id da sala trafega em claro.
+- Os tokens de túnel vêm de `/dev/urandom`, então o relay só roda em Unix.
+
+**Hospedando numa VM** — 1 vCPU e 512 MB a 1 GB de RAM bastam; o que pesa é a banda (cada byte transferido entra e sai da VM), então escolha o provedor pela franquia de tráfego de saída. Abra uma única porta TCP (a 443 passa pela maioria das redes restritivas) mais o SSH, e rode sob systemd com [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (sem root, só `CAP_NET_BIND_SERVICE`). Configurar `net.ipv4.tcp_keepalive_time=60` ajuda a derrubar sessões mortas.
+
 ## Estrutura do projeto
 
 ```
@@ -225,7 +254,8 @@ src/
 ├── net.rs     Descoberta (varredura/broadcast UDP), protocolo de arquivos/pastas com retomada e hash, regras de recebimento
 ├── secure.rs  Canal criptografado Noise XX, identidade do aparelho, código de pareamento
 ├── ui.rs      O radar em egui: sprites em pixel art, pontos, painéis, rodapé
-└── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+├── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+└── bin/pdrop-relay.rs  Servidor relay: salas + túnel TCP
 assets/        Fontes em Aseprite e PNGs exportados (fonte, ícones, sprites)
 ```
 

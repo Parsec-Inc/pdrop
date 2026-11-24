@@ -217,6 +217,35 @@ Everything is peer-to-peer on the LAN; there is no server anywhere.
 | Clipboard bridge stops on its own | That's by design when the peer refuses, disconnects, or leaves — the header will say *ponte encerrada*. |
 | Two instances on the same machine | Fine on Linux (SO_REUSEPORT); they'll see each other. |
 
+## Relay (`pdrop-relay`)
+
+`pdrop-relay` is a small server for connecting devices that are not on the same network. It has no accounts and no global device list: a **room** is the `blake3` of a secret that only its members know (64 hex), and devices only see others in the same room. Use a random secret (128 bits or more); a short human-chosen phrase can be guessed. Content stays end-to-end encrypted (Noise): the relay forwards bytes and sees only who talks to whom and how much. The client side (`--relay`, `--room`) is not wired into the app yet.
+
+```bash
+cargo build --release --bin pdrop-relay
+pdrop-relay --listen 0.0.0.0:443     # default
+```
+
+**Protocol** — one line per message, ending in `\n`:
+
+| Message | Meaning |
+|---------|---------|
+| `HELLO <room> <uid>` | Control connection. The relay answers `OK` (or closes). |
+| `BEACON <text>` | Client → relay, every few seconds. Silence for more than 30 s drops the member. |
+| `BEACON <uid> <text>`, `GONE <uid>`, `INCOMING <token>` | Relay → client: presence of another member, a member left, someone wants to connect. |
+| `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
+| `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
+
+**Limits** — 32 connections per IP, 32 members per room, 1024 rooms, 30 requests per minute per IP, 10 s for the target to accept, 120 s without traffic closes a tunnel. Room ids are never logged.
+
+**Known shortcuts**
+- A repeated uid in a room replaces the old one (so reconnecting works). A member could kick another with a forged uid, but cannot hijack a transfer: the Noise handshake checks the uid.
+- Behind a shared NAT, users split the per-IP rate limit.
+- No TLS between client and relay: content is already encrypted, but the room id travels in clear.
+- Tunnel tokens come from `/dev/urandom`, so the relay is Unix-only.
+
+**Hosting on a VM** — 1 vCPU and 512 MB–1 GB of RAM are enough; bandwidth is what matters (every transferred byte enters and leaves the VM), so pick the provider by its outbound traffic allowance. Open a single TCP port (443 passes most restrictive networks) plus SSH, and run it under systemd with [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (unprivileged, `CAP_NET_BIND_SERVICE` only). Setting `net.ipv4.tcp_keepalive_time=60` helps drop dead sessions.
+
 ## Project layout
 
 ```
@@ -225,7 +254,8 @@ src/
 ├── net.rs     Discovery (UDP sweep/broadcast), file/folder protocol with resume + hashing, receive rules
 ├── secure.rs  Noise XX encrypted channel, device identity, pairing code
 ├── ui.rs      The egui radar: pixel-art sprites, blips, panels, footer
-└── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+├── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+└── bin/pdrop-relay.rs  Relay server: rooms + TCP tunnel
 assets/        Aseprite sources and exported PNGs (font, icons, sprites)
 ```
 
