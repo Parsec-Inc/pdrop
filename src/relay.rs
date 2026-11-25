@@ -1,4 +1,5 @@
-//! cliente do `pdrop-relay`: a conexão de controle, que põe no radar quem está em outra rede
+//! cliente do `pdrop-relay`: a conexão de controle, que põe no radar quem está em outra rede,
+//! e os túneis por onde passam as transferências
 
 use crate::net::{self, Peers, Policy, Route};
 use socket2::{SockRef, TcpKeepalive};
@@ -16,6 +17,8 @@ use std::{
 const EVERY: Duration = Duration::from_millis(1500);
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// o relay espera até 10 s o alvo aceitar um túnel: a resposta pode levar mais que isso
+const TUNNEL_TIMEOUT: Duration = Duration::from_secs(15);
 /// o relay limita o que recebe a 512 bytes e acrescenta o uid ao repassar
 const MAX_LINE: u64 = 1024;
 
@@ -33,12 +36,16 @@ pub struct Me {
     pub policy: Arc<Policy>,
 }
 
+/// recebe a transferência de um túnel que outro aparelho abriu até nós
+pub type Incoming = Arc<dyn Fn(TcpStream) + Send + Sync>;
+
 /// o relay só conhece o hash: o segredo não sai daqui
 pub fn room_of(secret: &str) -> String {
     blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
 }
 
-pub fn watch(cfg: Config, me: Me, peers: Peers) {
+pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) {
+    let cfg = Arc::new(cfg);
     thread::spawn(move || {
         let mut wait = Duration::from_secs(1);
         let mut last_error = String::new();
@@ -48,7 +55,7 @@ pub fn watch(cfg: Config, me: Me, peers: Peers) {
                 Ok(s) => {
                     eprintln!("relay: conectado a {}", cfg.addr);
                     last_error.clear();
-                    let e = session(s, &me, &peers);
+                    let e = session(s, &cfg, &me, &peers, &incoming);
                     drop_relay_peers(&peers, None);
                     e
                 }
@@ -103,6 +110,43 @@ fn connect(cfg: &Config, uid: u128) -> io::Result<BufReader<TcpStream>> {
     Ok(r)
 }
 
+/// abre um túnel até outro membro da sala
+pub fn dial(cfg: &Config, target: u128) -> io::Result<TcpStream> {
+    tunnel(&cfg.addr, &format!("DIAL {} {target:x}", cfg.room))
+}
+
+fn accept(cfg: &Config, uid: u128, token: u128) -> io::Result<TcpStream> {
+    tunnel(&cfg.addr, &format!("ACCEPT {} {uid:x} {token:x}", cfg.room))
+}
+
+fn tunnel(addr: &str, request: &str) -> io::Result<TcpStream> {
+    let mut s = dial_tcp(addr)?;
+    s.set_read_timeout(Some(TUNNEL_TIMEOUT))?;
+    s.set_write_timeout(Some(TIMEOUT))?;
+    s.set_nodelay(true)?;
+    s.write_all(format!("{request}\n").as_bytes())?;
+    // um byte por vez: o que vem depois do OK já é do handshake e não pode ficar num buffer
+    let mut answer = Vec::new();
+    let mut byte = [0u8; 1];
+    while answer.len() < 8 {
+        if s.read(&mut byte)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "o relay fechou a conexão; pode ser o limite de uso",
+            ));
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        answer.push(byte[0]);
+    }
+    if answer != b"OK" {
+        return Err(io::Error::other("o relay não alcançou o aparelho"));
+    }
+    s.set_write_timeout(Some(Duration::from_secs(30)))?;
+    Ok(s)
+}
+
 fn read_line(r: &mut impl BufRead) -> io::Result<String> {
     let mut l = String::new();
     r.take(MAX_LINE).read_line(&mut l)?;
@@ -116,7 +160,13 @@ fn read_line(r: &mut impl BufRead) -> io::Result<String> {
 }
 
 /// anuncia e escuta até a conexão cair
-fn session(mut r: BufReader<TcpStream>, me: &Me, peers: &Peers) -> io::Error {
+fn session(
+    mut r: BufReader<TcpStream>,
+    cfg: &Arc<Config>,
+    me: &Me,
+    peers: &Peers,
+    incoming: &Incoming,
+) -> io::Error {
     let mut w = match r.get_ref().try_clone() {
         Ok(w) => w,
         Err(e) => return e,
@@ -134,7 +184,10 @@ fn session(mut r: BufReader<TcpStream>, me: &Me, peers: &Peers) -> io::Error {
     });
     let error = loop {
         match read_line(&mut r) {
-            Ok(l) => handle(&l, me, peers),
+            Ok(l) => match l.strip_prefix("INCOMING ") {
+                Some(token) => answer(token, cfg, me.uid, incoming),
+                None => handle(&l, cfg, me, peers),
+            },
             Err(e) => break e,
         }
     };
@@ -143,6 +196,18 @@ fn session(mut r: BufReader<TcpStream>, me: &Me, peers: &Peers) -> io::Error {
     writer.thread().unpark();
     let _ = writer.join();
     error
+}
+
+/// atende um INCOMING numa thread própria, sem parar a conexão de controle
+fn answer(token: &str, cfg: &Arc<Config>, uid: u128, incoming: &Incoming) {
+    let Ok(token) = u128::from_str_radix(token, 16) else {
+        return;
+    };
+    let (cfg, incoming) = (cfg.clone(), incoming.clone());
+    thread::spawn(move || match accept(&cfg, uid, token) {
+        Ok(s) => incoming(s),
+        Err(e) => eprintln!("relay: não consegui atender uma conexão: {e}"),
+    });
 }
 
 fn announce(me: &Me) -> String {
@@ -159,14 +224,13 @@ fn announce(me: &Me) -> String {
     )
 }
 
-fn handle(line: &str, me: &Me, peers: &Peers) {
+fn handle(line: &str, cfg: &Arc<Config>, me: &Me, peers: &Peers) {
     if let Some(uid) = line.strip_prefix("GONE ") {
         if let Ok(uid) = u128::from_str_radix(uid, 16) {
             drop_relay_peers(peers, Some(uid));
         }
         return;
     }
-    // INCOMING ainda é ignorado: o recebimento pelo relay não está implementado
     let Some((uid, beacon)) = line.strip_prefix("BEACON ").and_then(|l| l.split_once(' ')) else {
         return;
     };
@@ -190,7 +254,7 @@ fn handle(line: &str, me: &Me, peers: &Peers) {
         peers,
         id,
         net::clean(name),
-        Route::Relay,
+        Route::Relay(cfg.clone()),
         color,
         uid,
         Instant::now(),
@@ -202,7 +266,7 @@ fn drop_relay_peers(peers: &Peers, uid: Option<u128>) {
     peers
         .lock()
         .unwrap()
-        .retain(|_, p| !matches!(p.route, Route::Relay) || uid.is_some_and(|u| u != p.uid));
+        .retain(|_, p| !matches!(p.route, Route::Relay(_)) || uid.is_some_and(|u| u != p.uid));
 }
 
 #[cfg(test)]
@@ -213,7 +277,25 @@ mod server;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use crate::{
+        net::{Grants, Msg, Who},
+        secure,
+    };
+    use std::{net::TcpListener, sync::mpsc::channel};
+
+    fn start_server() -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        thread::spawn(move || server::serve(l, Arc::new(server::State::default())));
+        addr
+    }
+
+    fn config(addr: &str) -> Config {
+        Config {
+            addr: addr.into(),
+            room: room_of("segredo"),
+        }
+    }
 
     fn me(id: u64, vis: u8) -> Me {
         Me {
@@ -238,16 +320,11 @@ mod tests {
 
     #[test]
     fn peers_show_up_through_a_real_relay() {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap().to_string();
-        thread::spawn(move || server::serve(l, Arc::new(server::State::default())));
+        let addr = start_server();
         let join = |id, vis| {
             let peers = Peers::default();
-            let cfg = Config {
-                addr: addr.clone(),
-                room: room_of("segredo"),
-            };
-            watch(cfg, me(id, vis), peers.clone());
+            let incoming: Incoming = Arc::new(|_| {});
+            watch(config(&addr), me(id, vis), peers.clone(), incoming);
             peers
         };
         let a = join(1, net::VIS_ALL);
@@ -263,13 +340,108 @@ mod tests {
         let g = a.lock().unwrap();
         assert!(!g.contains_key(&3), "o invisível não aparece");
         let p = &g[&2];
-        assert!(matches!(p.route, Route::Relay));
+        assert!(matches!(p.route, Route::Relay(_)));
         assert_eq!((p.name.as_str(), p.color, p.uid), ("aparelho 2", 3, 102));
+    }
+
+    #[test]
+    fn transfers_go_through_the_relay() {
+        let addr = start_server();
+        let dir = std::env::temp_dir().join(format!("pdrop-relay-test-{}", std::process::id()));
+        let (out, src) = (dir.join("recebidos"), dir.join("origem"));
+        std::fs::create_dir_all(&src).unwrap();
+        let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(src.join("big.bin"), &big).unwrap();
+        std::fs::write(src.join("foto.jpg"), &big).unwrap();
+
+        let ((sk, sp), (rk, rp)) = (secure::generate(), secure::generate());
+        let (suid, ruid) = (secure::id_of(&sp), secure::id_of(&rp));
+        let device = |id, uid| Me {
+            uid,
+            ..me(id, net::VIS_ALL)
+        };
+
+        // quem recebe aceita tudo
+        let (rtx, rrx) = channel();
+        let policy = Arc::new(Policy {
+            key: rk,
+            ..Default::default()
+        });
+        let (out2, grants) = (out.clone(), Grants::default());
+        let incoming: Incoming = Arc::new(move |s| {
+            net::recv(s, &rtx, &out2, &grants, &policy).unwrap();
+        });
+        watch(config(&addr), device(2, ruid), Peers::default(), incoming);
+        let (got_tx, got) = channel();
+        thread::spawn(move || {
+            for m in rrx {
+                match m {
+                    Msg::Ask(_, answer) => answer.send(true).unwrap(),
+                    Msg::End(_, r) => got_tx.send(r).unwrap(),
+                    _ => {}
+                }
+            }
+        });
+
+        let peers = Peers::default();
+        watch(
+            config(&addr),
+            device(1, suid),
+            peers.clone(),
+            Arc::new(|_| {}),
+        );
+        until("o remetente vê o destinatário", || {
+            peers.lock().unwrap().contains_key(&2)
+        });
+        let to = peers.lock().unwrap()[&2].clone();
+        let who = Who {
+            name: "eu".into(),
+            key: sk,
+        };
+        let (tx, rx) = channel();
+        let sent = || loop {
+            if let Msg::End(_, r) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                break r;
+            }
+        };
+        let received = || got.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        net::send(
+            to.clone(),
+            who.clone(),
+            vec!["oi de longe".into()],
+            tx.clone(),
+        );
+        assert_eq!(sent(), Ok("enviado".into()));
+        assert_eq!(received(), Ok("oi de longe".into()));
+
+        net::send(
+            to.clone(),
+            who.clone(),
+            vec![src.display().to_string()],
+            tx.clone(),
+        );
+        assert_eq!(sent(), Ok("enviado".into()));
+        received().unwrap();
+        for f in ["big.bin", "foto.jpg"] {
+            assert_eq!(std::fs::read(out.join("origem").join(f)).unwrap(), big);
+        }
+
+        // ninguém com esse uid na sala
+        let ghost = net::Peer {
+            uid: ruid ^ 1,
+            ..to
+        };
+        net::send(ghost, who, vec!["oi".into()], tx.clone());
+        assert!(sent().unwrap_err().contains("não alcançou"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn gone_only_removes_relay_routes() {
         let (peers, me) = (Peers::default(), me(1, net::VIS_ALL));
+        let cfg = Arc::new(config("sem-uso:1"));
+        let handle = |line, me, peers| super::handle(line, &cfg, me, peers);
         handle("BEACON a 2|0|0|longe", &me, &peers);
         handle("BEACON b 3|0|0|com|barra", &me, &peers);
         handle("BEACON c 1|0|0|eu mesmo", &me, &peers);

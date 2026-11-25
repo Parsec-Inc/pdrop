@@ -1039,7 +1039,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(net::VIS_ALL),
         ),
     });
-    let port = net::listen(dir, tx.clone(), grants.clone(), policy.clone())?;
+    let port = net::listen(dir.clone(), tx.clone(), grants.clone(), policy.clone())?;
     let color = load_color();
     let icon = load_icon();
     let shared_color = Arc::new(AtomicU8::new(color | icon << 3));
@@ -1057,6 +1057,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // provisório, só para testar o relay: as opções definitivas ainda faltam
     if let (Ok(addr), Ok(secret)) = (std::env::var("PDROP_RELAY"), std::env::var("PDROP_ROOM")) {
+        let (tx, grants, rules) = (tx.clone(), grants.clone(), policy.clone());
+        let incoming: relay::Incoming = Arc::new(move |s| {
+            let _ = net::recv(s, &tx, &dir, &grants, &rules);
+        });
         relay::watch(
             relay::Config {
                 addr,
@@ -1070,6 +1074,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 policy: policy.clone(),
             },
             peers.clone(),
+            incoming,
         );
     }
 

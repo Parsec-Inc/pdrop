@@ -1,5 +1,5 @@
 use crate::{
-    clip,
+    clip, relay,
     secure::{self, Secure},
 };
 use socket2::{Domain, Protocol, Socket, Type};
@@ -43,17 +43,17 @@ pub struct Who {
 }
 
 /// como alcançar um aparelho
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Route {
     Lan(SocketAddr),
-    Relay,
+    Relay(Arc<relay::Config>),
 }
 
 impl Route {
-    pub fn lan_ip(self) -> Option<IpAddr> {
+    pub fn lan_ip(&self) -> Option<IpAddr> {
         match self {
             Route::Lan(a) => Some(a.ip()),
-            Route::Relay => None,
+            Route::Relay(_) => None,
         }
     }
 }
@@ -382,7 +382,7 @@ impl<R: Read> Read for HashRead<'_, R> {
     }
 }
 
-fn recv(
+pub fn recv(
     s: TcpStream,
     tx: &Sender<Msg>,
     dir: &Path,
@@ -1006,27 +1006,23 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
-fn connect(route: Route) -> io::Result<TcpStream> {
-    match route {
-        Route::Lan(addr) => {
-            TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
-                    ),
-                )
-            })
-        }
-        Route::Relay => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "envio pelo relay ainda não implementado",
-        )),
+fn connect(to: &Peer) -> io::Result<TcpStream> {
+    match &to.route {
+        Route::Lan(addr) => TcpStream::connect_timeout(addr, Duration::from_secs(5)).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
+                ),
+            )
+        }),
+        Route::Relay(cfg) => relay::dial(cfg, to.uid)
+            .map_err(|e| io::Error::new(e.kind(), format!("não conectou pelo relay ({e})"))),
     }
 }
 
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
-    let tcp = connect(to.route)?;
+    let tcp = connect(to)?;
     tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut s = secure::handshake(tcp, &me.key, true)?;
@@ -1280,18 +1276,24 @@ mod tests {
         let lan = Route::Lan(([127, 0, 0, 1], 1).into());
         let t0 = Instant::now();
         let put = |route, uid, at| upsert(&peers, 1, "a".into(), route, 0, uid, at);
+        let relay = || {
+            Route::Relay(Arc::new(relay::Config {
+                addr: String::new(),
+                room: String::new(),
+            }))
+        };
         let is_lan = || matches!(peers.lock().unwrap()[&1].route, Route::Lan(_));
 
-        assert!(!put(Route::Relay, 7, t0));
-        assert!(put(lan, 7, t0), "veio do relay e apareceu na LAN");
+        assert!(!put(relay(), 7, t0));
+        assert!(put(lan.clone(), 7, t0), "veio do relay e apareceu na LAN");
         assert!(!put(lan, 7, t0));
         let soon = t0 + Duration::from_secs(1);
-        put(Route::Relay, 7, soon);
+        put(relay(), 7, soon);
         assert!(is_lan());
         assert_eq!(peers.lock().unwrap()[&1].seen, t0);
-        put(Route::Relay, 8, t0 + LAN_FRESH);
+        put(relay(), 8, t0 + LAN_FRESH);
         assert!(is_lan(), "outra identidade não assume");
-        put(Route::Relay, 7, t0 + LAN_FRESH);
+        put(relay(), 7, t0 + LAN_FRESH);
         assert!(!is_lan());
     }
 

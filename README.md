@@ -236,7 +236,7 @@ pdrop-relay --listen 0.0.0.0:443     # default
 | `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
 | `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
 
-**Limits** — 32 connections per IP, 32 members per room, 1024 rooms, 30 requests per minute per IP, 10 s for the target to accept, 120 s without traffic closes a tunnel. Room ids are never logged.
+**Limits** — 32 connections per IP, 32 members per room, 1024 rooms, per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), 10 s for the target to accept, 120 s without traffic closes a tunnel. Room ids are never logged.
 
 **Known shortcuts**
 - A repeated uid in a room replaces the old one (so reconnecting works). A member could kick another with a forged uid, but cannot hijack a transfer: the Noise handshake checks the uid.

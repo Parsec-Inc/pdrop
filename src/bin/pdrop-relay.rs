@@ -16,6 +16,8 @@ const MAX_PER_IP: u32 = 32;
 const MAX_ROOM: usize = 32;
 const MAX_ROOMS: usize = 1024;
 const MAX_RATE: u32 = 30;
+/// túneis têm cota própria: cada transferência gasta um DIAL e um ACCEPT
+const MAX_TUNNEL_RATE: u32 = 120;
 const WINDOW: Duration = Duration::from_secs(60);
 const MAX_LINE: usize = 512;
 const WAIT: Duration = Duration::from_secs(30);
@@ -42,22 +44,22 @@ pub struct State {
     rooms: Mutex<HashMap<String, HashMap<u128, Member>>>,
     pending: Mutex<HashMap<u128, Pending>>,
     conns: Mutex<HashMap<IpAddr, u32>>,
-    rate: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+    rate: Mutex<HashMap<(IpAddr, bool), (Instant, u32)>>,
     epoch: AtomicU64,
 }
 
 impl State {
-    fn allow(&self, ip: IpAddr) -> bool {
+    fn allow(&self, ip: IpAddr, tunnel: bool) -> bool {
         let mut r = self.rate.lock().unwrap();
         if r.len() > 10_000 {
             r.retain(|_, (t, _)| t.elapsed() < WINDOW);
         }
-        let e = r.entry(ip).or_insert((Instant::now(), 0));
+        let e = r.entry((ip, tunnel)).or_insert((Instant::now(), 0));
         if e.0.elapsed() >= WINDOW {
             *e = (Instant::now(), 0);
         }
         e.1 += 1;
-        e.1 <= MAX_RATE
+        e.1 <= if tunnel { MAX_TUNNEL_RATE } else { MAX_RATE }
     }
 }
 
@@ -283,10 +285,12 @@ fn handle(st: &State, mut s: TcpStream, ip: IpAddr) -> io::Result<()> {
     s.set_read_timeout(Some(WAIT))?;
     s.set_write_timeout(Some(WRITE))?;
     s.set_nodelay(true)?;
-    if !st.allow(ip) {
+    let line = read_line(&mut s)?;
+    // linhas inválidas caem na cota menor
+    let tunnel = line.starts_with("DIAL ") || line.starts_with("ACCEPT ");
+    if !st.allow(ip, tunnel) {
         return Err(bad("rate"));
     }
-    let line = read_line(&mut s)?;
     match line.split(' ').collect::<Vec<_>>()[..] {
         ["HELLO", room, uid] => hello(st, s, room_id(room)?, hex(uid)?),
         ["DIAL", room, uid] => dial(st, s, &room_id(room)?, hex(uid)?),
@@ -345,6 +349,16 @@ mod tests {
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         writeln!(s, "{first}").unwrap();
         s
+    }
+
+    #[test]
+    fn tunnels_have_their_own_rate_limit() {
+        let st = State::default();
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        for (tunnel, max) in [(false, MAX_RATE), (true, MAX_TUNNEL_RATE)] {
+            assert!((0..max).all(|_| st.allow(ip, tunnel)));
+            assert!(!st.allow(ip, tunnel));
+        }
     }
 
     #[test]
