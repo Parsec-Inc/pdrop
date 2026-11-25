@@ -140,7 +140,7 @@ fn broadcast(st: &State, room: &str, except: u128, msg: &str) {
 fn hello(st: &State, mut s: TcpStream, room: String, uid: u128) -> io::Result<()> {
     let out: Out = Arc::new(Mutex::new(s.try_clone()?));
     let epoch = st.epoch.fetch_add(1, Ordering::Relaxed);
-    {
+    let welcome = {
         let mut guard = out.lock().unwrap();
         let mut rooms = st.rooms.lock().unwrap();
         if !rooms.contains_key(&room) && rooms.len() >= MAX_ROOMS {
@@ -158,14 +158,17 @@ fn hello(st: &State, mut s: TcpStream, room: String, uid: u128) -> io::Result<()
             },
         );
         drop(rooms);
-        guard.write_all(b"OK\n")?;
-    }
-    let res = (|| loop {
-        let l = read_line(&mut s)?;
-        if let Some(t) = l.strip_prefix("BEACON ") {
-            broadcast(st, &room, uid, &format!("BEACON {uid:x} {t}\n"));
+        guard.write_all(b"OK\n")
+    };
+    // mesmo se o OK falhar, a saída passa pela limpeza abaixo
+    let res = welcome.and_then(|()| {
+        loop {
+            let l = read_line(&mut s)?;
+            if let Some(t) = l.strip_prefix("BEACON ") {
+                broadcast(st, &room, uid, &format!("BEACON {uid:x} {t}\n"));
+            }
         }
-    })();
+    });
     let gone = {
         let mut rooms = st.rooms.lock().unwrap();
         let r = rooms.get_mut(&room);
@@ -359,6 +362,20 @@ mod tests {
             assert!((0..max).all(|_| st.allow(ip, tunnel)));
             assert!(!st.allow(ip, tunnel));
         }
+    }
+
+    #[test]
+    fn failed_welcome_leaves_no_ghost_member() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (s, _) = l.accept().unwrap();
+        s.shutdown(Shutdown::Write).unwrap(); // o envio do OK vai falhar
+        let st = State::default();
+        assert!(hello(&st, s, "a".repeat(64), 1).is_err());
+        assert!(
+            st.rooms.lock().unwrap().is_empty(),
+            "sobrou membro fantasma"
+        );
     }
 
     #[test]
