@@ -42,11 +42,28 @@ pub struct Who {
     pub key: [u8; 32],
 }
 
+/// como alcançar um aparelho
+#[derive(Clone, Copy)]
+pub enum Route {
+    Lan(SocketAddr),
+    #[allow(dead_code)] // ainda não é criada: falta a conexão de controle do relay
+    Relay,
+}
+
+impl Route {
+    pub fn lan_ip(self) -> Option<IpAddr> {
+        match self {
+            Route::Lan(a) => Some(a.ip()),
+            Route::Relay => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Peer {
     pub id: u64,
     pub name: String,
-    pub addr: SocketAddr,
+    pub route: Route,
     pub seen: Instant,
     pub born: Instant,
     pub rtt: Option<f64>,
@@ -170,7 +187,7 @@ pub fn discover(
                 .lock()
                 .unwrap()
                 .values()
-                .map(|p| p.addr.ip())
+                .filter_map(|p| p.route.lan_ip())
                 .collect();
             for ip in known {
                 send(ip, &beacon);
@@ -224,13 +241,14 @@ pub fn discover(
                     ) {
                         continue;
                     }
-                    let (now, addr) = (Instant::now(), SocketAddr::new(from.ip(), port));
+                    let (now, route) =
+                        (Instant::now(), Route::Lan(SocketAddr::new(from.ip(), port)));
                     let is_new = {
                         let mut g = peers.lock().unwrap();
                         match g.get_mut(&pid) {
                             Some(p) => {
-                                (p.name, p.addr, p.seen, p.color, p.uid) =
-                                    (clean(name), addr, now, col, puid);
+                                (p.name, p.route, p.seen, p.color, p.uid) =
+                                    (clean(name), route, now, col, puid);
                                 false
                             }
                             None => {
@@ -239,7 +257,7 @@ pub fn discover(
                                     Peer {
                                         id: pid,
                                         name: clean(name),
-                                        addr,
+                                        route,
                                         seen: now,
                                         born: now,
                                         rtt: None,
@@ -970,13 +988,27 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
+fn connect(route: Route) -> io::Result<TcpStream> {
+    match route {
+        Route::Lan(addr) => {
+            TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
+                    ),
+                )
+            })
+        }
+        Route::Relay => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "envio pelo relay ainda não implementado",
+        )),
+    }
+}
+
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
-    let tcp = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"),
-        )
-    })?;
+    let tcp = connect(to.route)?;
     tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut s = secure::handshake(tcp, &me.key, true)?;
@@ -1087,7 +1119,7 @@ mod tests {
         Peer {
             id: 1,
             name: "t".into(),
-            addr: ([127, 0, 0, 1], port).into(),
+            route: Route::Lan(([127, 0, 0, 1], port).into()),
             seen: Instant::now(),
             born: Instant::now(),
             rtt: None,
