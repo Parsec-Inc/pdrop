@@ -27,6 +27,34 @@ pub struct Config {
     pub room: String,
 }
 
+const MIN_SECRET: usize = 16;
+
+/// monta a configuração; sem endereço e sem segredo, o relay fica desligado
+pub fn config(addr: Option<&str>, secret: Option<&str>) -> Result<Option<Config>, String> {
+    let (addr, secret) = match (addr.map(str::trim), secret.map(str::trim)) {
+        (None, None) => return Ok(None),
+        (Some(a), Some(s)) => (a, s),
+        (Some(_), None) => return Err("relay sem o segredo da sala".into()),
+        (None, Some(_)) => return Err("segredo da sala sem o endereço do relay".into()),
+    };
+    let valid = addr
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0))
+        && !addr.chars().any(|c| c.is_whitespace() || c == '/');
+    if !valid {
+        return Err("endereço do relay inválido, use host:porta".into());
+    }
+    if secret.chars().count() < MIN_SECRET {
+        return Err(format!(
+            "segredo da sala curto demais (mínimo de {MIN_SECRET} caracteres); gere um com: openssl rand -hex 16"
+        ));
+    }
+    Ok(Some(Config {
+        addr: addr.into(),
+        room: room_of(secret),
+    }))
+}
+
 #[derive(Clone)]
 pub struct Me {
     pub id: u64,
@@ -342,6 +370,29 @@ mod tests {
         let p = &g[&2];
         assert!(matches!(p.route, Route::Relay(_)));
         assert_eq!((p.name.as_str(), p.color, p.uid), ("aparelho 2", 3, 102));
+    }
+
+    #[test]
+    fn configuration_is_checked() {
+        let secret = "0123456789abcdef";
+        assert!(super::config(None, None).unwrap().is_none());
+        let c = super::config(Some(" ex.com:443 "), Some(secret))
+            .unwrap()
+            .unwrap();
+        assert_eq!((c.addr.as_str(), c.room), ("ex.com:443", room_of(secret)));
+        assert!(super::config(Some("[::1]:443"), Some(secret)).is_ok());
+        for addr in [
+            "ex.com",
+            ":443",
+            "ex.com:0",
+            "ex.com:x",
+            "https://ex.com:443",
+        ] {
+            assert!(super::config(Some(addr), Some(secret)).is_err(), "{addr}");
+        }
+        assert!(super::config(Some("ex.com:443"), Some(&secret[1..])).is_err());
+        assert!(super::config(Some("ex.com:443"), None).is_err());
+        assert!(super::config(None, Some(secret)).is_err());
     }
 
     #[test]

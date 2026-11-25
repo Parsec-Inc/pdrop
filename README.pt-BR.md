@@ -129,8 +129,8 @@ cargo run --release -- --name laptop
 ## Uso
 
 ```bash
-pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm]
-pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|-...
+pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm] [--relay HOST:PORTA] [--room SEGREDO]
+pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room SEGREDO] CAMINHO|TEXTO|-...
 ```
 
 | Opção | Significado |
@@ -138,6 +138,7 @@ pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|-...
 | `--name`, `-n NOME` | Nome exibido só nesta sessão (sobrepõe o salvo). |
 | `--peer`, `-p IP` | Também envia os beacons de descoberta direto para esse IP. Repita a opção para vários peers. Útil em redes que filtram broadcast/multicast — basta apontar para o IP da outra máquina. |
 | `--dir`, `-d PASTA` | Onde os arquivos recebidos caem, no lugar de `~/Downloads` (as regras de recebimento continuam valendo primeiro). |
+| `--relay HOST:PORTA`, `--room SEGREDO` | Alcança aparelhos em outras redes (veja [Conectando a um relay](#conectando-a-um-relay)). |
 | `--calm` | Animação mais lenta e discreta. Fica ainda mais lenta enquanto você digita ou há um pedido pendente. |
 
 Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentro da janela, ou com `pdrop send` (veja acima).
@@ -219,12 +220,28 @@ Tudo é ponto a ponto na rede local; não existe servidor em lugar nenhum.
 
 ## Relay (`pdrop-relay`)
 
-O `pdrop-relay` é um servidor pequeno para conectar aparelhos que não estão na mesma rede. Não tem contas nem lista global de aparelhos: uma **sala** é o `blake3` de um segredo que só os membros conhecem (64 hex), e cada aparelho só enxerga quem está na mesma sala. Use um segredo aleatório (128 bits ou mais); uma frase curta escolhida por uma pessoa pode ser adivinhada. O conteúdo continua cifrado ponta a ponta (Noise): o relay repassa bytes e só vê quem fala com quem e o volume. O lado do cliente (`--relay`, `--room`) ainda não está ligado ao app.
+O `pdrop-relay` é um servidor pequeno para conectar aparelhos que não estão na mesma rede. Não tem contas nem lista global de aparelhos: uma **sala** é o `blake3` de um segredo que só os membros conhecem (64 hex), e cada aparelho só enxerga quem está na mesma sala. Use um segredo aleatório (128 bits ou mais); uma frase curta escolhida por uma pessoa pode ser adivinhada. O conteúdo continua cifrado ponta a ponta (Noise): o relay repassa bytes e só vê quem fala com quem e o volume. Veja [Conectando a um relay](#conectando-a-um-relay) para o lado do cliente.
 
 ```bash
 cargo build --release --bin pdrop-relay
 pdrop-relay --listen 0.0.0.0:443     # padrão
 ```
+
+### Conectando a um relay
+
+Todo aparelho precisa do endereço do relay e do mesmo segredo de sala. Gere o segredo uma vez com `openssl rand -hex 16`; ele precisa de pelo menos 16 caracteres, mas só o tamanho não o torna forte.
+
+O jeito preferido é escrever os dois arquivos (o segredo não fica no histórico do shell nem na lista de processos):
+
+```bash
+mkdir -p ~/.config/pdrop
+echo relay.exemplo.com:443 > ~/.config/pdrop/relay
+(umask 077; cat > ~/.config/pdrop/sala)   # cole o segredo, dê enter e depois ctrl+d
+```
+
+`--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva nesses arquivos, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do arquivo. Para desligar o relay, apague os dois arquivos.
+
+Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN.
 
 **Protocolo** — uma linha por mensagem, terminada em `\n`:
 

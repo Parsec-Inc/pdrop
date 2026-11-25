@@ -129,8 +129,8 @@ cargo run --release -- --name laptop
 ## Usage
 
 ```bash
-pdrop [--name NAME] [--peer IP]... [--dir FOLDER] [--calm]
-pdrop send [--to NAME] [--peer IP]... [--as NAME] PATH|TEXT|-...
+pdrop [--name NAME] [--peer IP]... [--dir FOLDER] [--calm] [--relay HOST:PORT] [--room SECRET]
+pdrop send [--to NAME] [--peer IP]... [--as NAME] [--relay HOST:PORT] [--room SECRET] PATH|TEXT|-...
 ```
 
 | Flag | Meaning |
@@ -138,6 +138,7 @@ pdrop send [--to NAME] [--peer IP]... [--as NAME] PATH|TEXT|-...
 | `--name`, `-n NAME` | Display name for this session only (overrides the saved one). |
 | `--peer`, `-p IP` | Also send discovery beacons directly to this IP. Repeat the flag for several peers. Useful on networks that filter broadcast/multicast — just point it at the other machine's IP. |
 | `--dir`, `-d FOLDER` | Where received files go instead of `~/Downloads` (receive rules still apply first). |
+| `--relay HOST:PORT`, `--room SECRET` | Reach devices on other networks (see [Connecting to a relay](#connecting-to-a-relay)). |
 | `--calm` | Slower, quieter animation. Also slows down further while you're typing or a prompt is pending. |
 
 With no valid arguments, it prints the usage line. Everything else is done inside the window, or with `pdrop send` (see above).
@@ -219,12 +220,28 @@ Everything is peer-to-peer on the LAN; there is no server anywhere.
 
 ## Relay (`pdrop-relay`)
 
-`pdrop-relay` is a small server for connecting devices that are not on the same network. It has no accounts and no global device list: a **room** is the `blake3` of a secret that only its members know (64 hex), and devices only see others in the same room. Use a random secret (128 bits or more); a short human-chosen phrase can be guessed. Content stays end-to-end encrypted (Noise): the relay forwards bytes and sees only who talks to whom and how much. The client side (`--relay`, `--room`) is not wired into the app yet.
+`pdrop-relay` is a small server for connecting devices that are not on the same network. It has no accounts and no global device list: a **room** is the `blake3` of a secret that only its members know (64 hex), and devices only see others in the same room. Use a random secret (128 bits or more); a short human-chosen phrase can be guessed. Content stays end-to-end encrypted (Noise): the relay forwards bytes and sees only who talks to whom and how much. See [Connecting to a relay](#connecting-to-a-relay) for the client side.
 
 ```bash
 cargo build --release --bin pdrop-relay
 pdrop-relay --listen 0.0.0.0:443     # default
 ```
+
+### Connecting to a relay
+
+Every device needs the relay address and the same room secret. Generate the secret once with `openssl rand -hex 16`; it needs at least 16 characters, but length alone does not make it strong.
+
+The preferred way is to write the two files (the secret stays out of your shell history and process list):
+
+```bash
+mkdir -p ~/.config/pdrop
+echo relay.example.com:443 > ~/.config/pdrop/relay
+(umask 077; cat > ~/.config/pdrop/sala)   # paste the secret, press enter, then ctrl+d
+```
+
+`--relay HOST:PORT` and `--room SECRET` work too: the window saves them to those files, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the file. To turn the relay off, delete both files.
+
+An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN.
 
 **Protocol** — one line per message, ending in `\n`:
 

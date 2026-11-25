@@ -645,6 +645,76 @@ fn save_setting(k: &str, v: &str) {
     let _ = std::fs::create_dir_all(p.parent().unwrap()).and_then(|_| std::fs::write(p, v));
 }
 
+/// como o `save_setting`, mas o arquivo só pode ser lido pelo dono (no Unix)
+fn save_secret(k: &str, v: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let p = setting_path(k);
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let mut f = o.open(&p)?;
+    // restringe antes de escrever, caso o arquivo já existisse mais aberto
+    owner_only(&p)?;
+    f.set_len(0)?;
+    f.write_all(v.as_bytes())
+}
+
+fn owner_only(_p: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(_p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct RelayFlags {
+    addr: Option<String>,
+    room: Option<String>,
+}
+
+impl RelayFlags {
+    /// cada valor vem da opção, senão da variável de ambiente, senão do arquivo salvo.
+    /// Erro só interrompe quando uma opção foi passada: config salva quebrada não impede a LAN.
+    fn load(&self) -> Result<Option<relay::Config>, String> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let addr = self
+            .addr
+            .clone()
+            .or_else(|| env("PDROP_RELAY"))
+            .or_else(|| load_setting("relay"));
+        let room = self.room.clone().or_else(|| env("PDROP_ROOM")).or_else(|| {
+            let saved = load_setting("sala");
+            if saved.is_some() {
+                let _ = owner_only(&setting_path("sala"));
+            }
+            saved
+        });
+        match relay::config(addr.as_deref(), room.as_deref()) {
+            Err(e) if self.addr.is_none() && self.room.is_none() => {
+                eprintln!("relay desligado: {e}");
+                Ok(None)
+            }
+            r => r,
+        }
+    }
+
+    /// guarda o que veio por opção, para as próximas vezes
+    fn save(&self) {
+        if let Some(a) = &self.addr {
+            save_setting("relay", a.trim());
+        }
+        if let Some(s) = &self.room
+            && let Err(e) = save_secret("sala", s.trim())
+        {
+            eprintln!("não consegui salvar o segredo da sala: {e}");
+        }
+    }
+}
+
 const HIST_MAX: usize = 200;
 
 fn esc(s: &str) -> String {
@@ -830,8 +900,10 @@ fn window_icon() -> eframe::egui::IconData {
     }
 }
 
-const USAGE: &str = "uso: pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm]
-     pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|- ...
+const USAGE: &str = "uso: pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm] [--relay HOST:PORTA] [--room SEGREDO]
+     pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room SEGREDO] CAMINHO|TEXTO|- ...
+relay (aparelhos em outra rede): a janela salva --relay e --room em ~/.config/pdrop/{relay,sala};
+também valem PDROP_RELAY e PDROP_ROOM; prefira o arquivo sala, que não fica no histórico do shell
 recebidos vão para ~/Downloads (ou --dir); regras de destino em ~/.config/pdrop/destinos;
 IPs fixos (VPN/Tailscale) em ~/.config/pdrop/peers, um por linha";
 
@@ -845,11 +917,20 @@ fn proc_id() -> u64 {
 
 fn cli_send(args: Vec<String>) -> i32 {
     let (mut to, mut name_as, mut direct, mut inputs) = (None, None, saved_peers(), vec![]);
+    let mut flags = RelayFlags::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--to" | "-t" => to = it.next(),
             "--as" => name_as = it.next(),
+            "--relay" => match it.next() {
+                Some(a) => flags.addr = Some(a),
+                None => return usage(),
+            },
+            "--room" => match it.next() {
+                Some(s) => flags.room = Some(s),
+                None => return usage(),
+            },
             "--peer" | "-p" => match it.next().and_then(|ip| ip.parse::<std::net::IpAddr>().ok()) {
                 Some(ip) => direct.push(ip),
                 None => return usage(),
@@ -862,6 +943,13 @@ fn cli_send(args: Vec<String>) -> i32 {
     if inputs.is_empty() {
         return usage();
     }
+    let relay = match flags.load() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     let tmp = std::env::temp_dir().join(format!("pdrop-{}", std::process::id()));
     for i in inputs.iter_mut().filter(|i| *i == "-") {
         let file =
@@ -878,7 +966,7 @@ fn cli_send(args: Vec<String>) -> i32 {
         }
         *i = file.display().to_string();
     }
-    let code = cli_run(to, direct, inputs);
+    let code = cli_run(to, direct, relay, inputs);
     let _ = std::fs::remove_dir_all(tmp);
     code
 }
@@ -888,7 +976,15 @@ fn usage() -> i32 {
     2
 }
 
-fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String>) -> i32 {
+/// tempo para um aparelho achado pelo relay também aparecer na LAN, que é o caminho preferido
+const LAN_GRACE: Duration = Duration::from_secs(3);
+
+fn cli_run(
+    to: Option<String>,
+    direct: Vec<std::net::IpAddr>,
+    relay: Option<relay::Config>,
+    inputs: Vec<String>,
+) -> i32 {
     let (key, uid) = load_identity();
     let me = load_setting("nome")
         .map(|n| net::clean(&n))
@@ -899,18 +995,37 @@ fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String
         ..Default::default()
     });
     let peers = Peers::default();
+    let id = proc_id();
     if let Err(e) = net::discover(
-        proc_id(),
+        id,
         uid,
         Arc::new(Mutex::new(me.clone())),
         0,
         Arc::new(AtomicU8::new(0)),
-        policy,
+        policy.clone(),
         peers.clone(),
         direct,
     ) {
         eprintln!("sem rede: {e}");
         return 1;
+    }
+    // com o relay a conexão pode demorar mais que a descoberta local
+    let wait = Duration::from_secs(if relay.is_some() { 8 } else { 6 });
+    if let Some(cfg) = relay {
+        // entra na sala com um uid descartável: o relay troca membros de uid repetido, e usar o
+        // nosso tiraria da sala a janela aberta nesta máquina. A transferência usa a chave real.
+        relay::watch(
+            cfg,
+            relay::Me {
+                id,
+                uid: secure::id_of(&secure::generate().1),
+                name: Arc::new(Mutex::new(me.clone())),
+                color: Arc::new(AtomicU8::new(0)),
+                policy,
+            },
+            peers.clone(),
+            Arc::new(|_| {}),
+        );
     }
     let pick = |v: &[Peer]| -> Option<Peer> {
         let t = to.as_ref()?.to_lowercase();
@@ -919,12 +1034,22 @@ fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String
             .or_else(|| v.iter().find(|p| p.name.to_lowercase().starts_with(&t)))
             .cloned()
     };
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let start = Instant::now();
+    let deadline = start + wait;
     let target = loop {
         std::thread::sleep(Duration::from_millis(200));
-        let v: Vec<Peer> = peers.lock().unwrap().values().cloned().collect();
+        // pelo relay, a janela desta máquina aparece como outro aparelho: não é um destino
+        let v: Vec<Peer> = peers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| !(matches!(p.route, net::Route::Relay(_)) && p.uid == uid))
+            .cloned()
+            .collect();
+        let found = pick(&v)
+            .filter(|p| matches!(p.route, net::Route::Lan(_)) || start.elapsed() >= LAN_GRACE);
         match (&to, v.as_slice()) {
-            (Some(_), _) if pick(&v).is_some() => break pick(&v),
+            (Some(_), _) if found.is_some() => break found,
             (None, _) if Instant::now() >= deadline => match v.as_slice() {
                 [p] => break Some(p.clone()),
                 [] => break None,
@@ -1000,6 +1125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut direct = saved_peers();
     let mut calm = false;
     let mut out_dir = None;
+    let mut flags = RelayFlags::default();
     while let Some(a) = args.next() {
         if a == "--calm" {
             calm = true;
@@ -1011,12 +1137,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 direct.push(ip.parse().unwrap())
             }
             ("--dir" | "-d", Some(d)) => out_dir = Some(PathBuf::from(d)),
+            ("--relay", Some(a)) => flags.addr = Some(a),
+            ("--room", Some(s)) => flags.room = Some(s),
             _ => {
                 eprintln!("{USAGE}");
                 return Ok(());
             }
         }
     }
+    let relay = match flags.load() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    flags.save();
     let id = proc_id();
     let dir = out_dir.unwrap_or_else(|| {
         std::env::var_os("SNAP_REAL_HOME")
@@ -1055,17 +1191,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direct,
     )?;
 
-    // provisório, só para testar o relay: as opções definitivas ainda faltam
-    if let (Ok(addr), Ok(secret)) = (std::env::var("PDROP_RELAY"), std::env::var("PDROP_ROOM")) {
+    if let Some(cfg) = relay {
         let (tx, grants, rules) = (tx.clone(), grants.clone(), policy.clone());
         let incoming: relay::Incoming = Arc::new(move |s| {
             let _ = net::recv(s, &tx, &dir, &grants, &rules);
         });
         relay::watch(
-            relay::Config {
-                addr,
-                room: relay::room_of(&secret),
-            },
+            cfg,
             relay::Me {
                 id,
                 uid,
