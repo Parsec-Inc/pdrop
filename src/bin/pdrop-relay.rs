@@ -38,7 +38,7 @@ struct Pending {
 }
 
 #[derive(Default)]
-struct State {
+pub struct State {
     rooms: Mutex<HashMap<String, HashMap<u128, Member>>>,
     pending: Mutex<HashMap<u128, Pending>>,
     conns: Mutex<HashMap<IpAddr, u32>>,
@@ -295,7 +295,7 @@ fn handle(st: &State, mut s: TcpStream, ip: IpAddr) -> io::Result<()> {
     }
 }
 
-fn serve(l: TcpListener, st: Arc<State>) {
+pub fn serve(l: TcpListener, st: Arc<State>) {
     for s in l.incoming().flatten() {
         let Ok(ip) = s.peer_addr().map(|a| a.ip()) else {
             continue;

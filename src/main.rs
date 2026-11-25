@@ -3,6 +3,7 @@
 mod clip;
 mod firewall;
 mod net;
+mod relay;
 mod secure;
 mod ui;
 
@@ -1053,6 +1054,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers.clone(),
         direct,
     )?;
+
+    // provisório, só para testar o relay: as opções definitivas ainda faltam
+    if let (Ok(addr), Ok(secret)) = (std::env::var("PDROP_RELAY"), std::env::var("PDROP_ROOM")) {
+        relay::watch(
+            relay::Config {
+                addr,
+                room: relay::room_of(&secret),
+            },
+            relay::Me {
+                id,
+                uid,
+                name: shared_name.clone(),
+                color: shared_color.clone(),
+                policy: policy.clone(),
+            },
+            peers.clone(),
+        );
+    }
 
     let firewall = firewall::watch();
 

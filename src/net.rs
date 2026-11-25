@@ -46,7 +46,6 @@ pub struct Who {
 #[derive(Clone, Copy)]
 pub enum Route {
     Lan(SocketAddr),
-    #[allow(dead_code)] // ainda não é criada: falta a conexão de controle do relay
     Relay,
 }
 
@@ -243,33 +242,8 @@ pub fn discover(
                     }
                     let (now, route) =
                         (Instant::now(), Route::Lan(SocketAddr::new(from.ip(), port)));
-                    let is_new = {
-                        let mut g = peers.lock().unwrap();
-                        match g.get_mut(&pid) {
-                            Some(p) => {
-                                (p.name, p.route, p.seen, p.color, p.uid) =
-                                    (clean(name), route, now, col, puid);
-                                false
-                            }
-                            None => {
-                                g.insert(
-                                    pid,
-                                    Peer {
-                                        id: pid,
-                                        name: clean(name),
-                                        route,
-                                        seen: now,
-                                        born: now,
-                                        rtt: None,
-                                        color: col,
-                                        uid: puid,
-                                    },
-                                );
-                                true
-                            }
-                        }
-                    };
-                    if is_new && !hidden {
+                    let new_on_lan = upsert(&peers, pid, clean(name), route, col, puid, now);
+                    if new_on_lan && !hidden {
                         let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
                     }
                 }
@@ -280,7 +254,51 @@ pub fn discover(
     Ok(())
 }
 
-fn shown(theirs: u8, mine: u8, trusted: bool) -> bool {
+/// sem beacon da LAN por esse tempo, o relay assume a rota; precisa ser menor que o prazo do radar (6 s)
+const LAN_FRESH: Duration = Duration::from_secs(4);
+
+/// registra um beacon vindo de qualquer um dos caminhos; a LAN tem prioridade sobre o relay.
+/// Devolve true quando o aparelho passou a ser alcançável pela LAN.
+pub fn upsert(
+    peers: &Peers,
+    id: u64,
+    name: String,
+    route: Route,
+    color: u8,
+    uid: u128,
+    now: Instant,
+) -> bool {
+    let lan = matches!(route, Route::Lan(_));
+    let mut g = peers.lock().unwrap();
+    let Some(p) = g.get_mut(&id) else {
+        g.insert(
+            id,
+            Peer {
+                id,
+                name,
+                route,
+                seen: now,
+                born: now,
+                rtt: None,
+                color,
+                uid,
+            },
+        );
+        return lan;
+    };
+    let was_lan = matches!(p.route, Route::Lan(_));
+    // o relay não troca a identidade de quem já está no radar, nem tira uma rota LAN ativa
+    if !lan && (p.uid != uid || (was_lan && now.duration_since(p.seen) < LAN_FRESH)) {
+        return false;
+    }
+    if !lan {
+        p.rtt = None;
+    }
+    (p.name, p.route, p.seen, p.color, p.uid) = (name, route, now, color, uid);
+    lan && !was_lan
+}
+
+pub fn shown(theirs: u8, mine: u8, trusted: bool) -> bool {
     trusted || (theirs != VIS_TRUSTED && mine != VIS_TRUSTED)
 }
 
@@ -1254,6 +1272,27 @@ mod tests {
         assert_eq!(route(&r, d, "bob", Some("x.pdf")), Path::new("/docs"));
         assert_eq!(route(&r, d, "bob", Some("x.rs")), d);
         assert_eq!(route(&r, d, "bob", None), d);
+    }
+
+    #[test]
+    fn lan_has_priority_over_relay() {
+        let peers = Peers::default();
+        let lan = Route::Lan(([127, 0, 0, 1], 1).into());
+        let t0 = Instant::now();
+        let put = |route, uid, at| upsert(&peers, 1, "a".into(), route, 0, uid, at);
+        let is_lan = || matches!(peers.lock().unwrap()[&1].route, Route::Lan(_));
+
+        assert!(!put(Route::Relay, 7, t0));
+        assert!(put(lan, 7, t0), "veio do relay e apareceu na LAN");
+        assert!(!put(lan, 7, t0));
+        let soon = t0 + Duration::from_secs(1);
+        put(Route::Relay, 7, soon);
+        assert!(is_lan());
+        assert_eq!(peers.lock().unwrap()[&1].seen, t0);
+        put(Route::Relay, 8, t0 + LAN_FRESH);
+        assert!(is_lan(), "outra identidade não assume");
+        put(Route::Relay, 7, t0 + LAN_FRESH);
+        assert!(!is_lan());
     }
 
     #[test]
