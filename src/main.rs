@@ -45,6 +45,7 @@ pub struct App {
     pub sp: ui::Sprites,
     pub focus: bool,
     pub firewall: firewall::Shared,
+    pub relay: Option<relay::Status>,
     pub uid: u128,
     pub policy: Arc<Policy>,
     pub hist: Vec<Rec>,
@@ -493,7 +494,7 @@ impl App {
             .is_some_and(|(id, ..)| !peers.iter().any(|p| p.id == *id))
         {
             self.stop_bridge();
-            self.flash("ponte encerrada: o aparelho saiu da rede");
+            self.flash("ponte encerrada: o aparelho saiu do radar");
         }
         if !peers.iter().any(|p| Some(p.id) == self.sel) {
             self.sel = peers.first().map(|p| p.id);
@@ -678,8 +679,9 @@ struct RelayFlags {
 
 impl RelayFlags {
     /// cada valor vem da opção, senão da variável de ambiente, senão do arquivo salvo.
-    /// Erro só interrompe quando uma opção foi passada: config salva quebrada não impede a LAN.
-    fn load(&self) -> Result<Option<relay::Config>, String> {
+    /// Erro só interrompe quando uma opção foi passada: config salva quebrada não impede a LAN,
+    /// e o motivo volta no segundo valor.
+    fn load(&self) -> Result<(Option<relay::Config>, Option<String>), String> {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let addr = self
             .addr
@@ -696,9 +698,9 @@ impl RelayFlags {
         match relay::config(addr.as_deref(), room.as_deref()) {
             Err(e) if self.addr.is_none() && self.room.is_none() => {
                 eprintln!("relay desligado: {e}");
-                Ok(None)
+                Ok((None, Some(e)))
             }
-            r => r,
+            r => r.map(|c| (c, None)),
         }
     }
 
@@ -944,7 +946,7 @@ fn cli_send(args: Vec<String>) -> i32 {
         return usage();
     }
     let relay = match flags.load() {
-        Ok(r) => r,
+        Ok((r, _)) => r,
         Err(e) => {
             eprintln!("{e}");
             return 2;
@@ -1145,7 +1147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let relay = match flags.load() {
+    let (relay, relay_off) = match flags.load() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -1191,12 +1193,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direct,
     )?;
 
+    let mut relay_status =
+        relay_off.map(|why| relay::Status::new(Mutex::new(relay::Link::Off(why))));
     if let Some(cfg) = relay {
         let (tx, grants, rules) = (tx.clone(), grants.clone(), policy.clone());
         let incoming: relay::Incoming = Arc::new(move |s| {
             let _ = net::recv(s, &tx, &dir, &grants, &rules);
         });
-        relay::watch(
+        relay_status = Some(relay::watch(
             cfg,
             relay::Me {
                 id,
@@ -1207,7 +1211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             peers.clone(),
             incoming,
-        );
+        ));
     }
 
     let firewall = firewall::watch();
@@ -1266,6 +1270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clip_sel: None,
                 marked: Default::default(),
                 firewall,
+                relay: relay_status,
                 view: load_setting("visao")
                     .and_then(|s| s.parse().ok())
                     .filter(|v| (*v as usize) < VIEWS.len())

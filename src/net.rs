@@ -69,6 +69,11 @@ pub struct Peer {
     pub color: u8,
     pub uid: u128,
 }
+impl Peer {
+    pub fn via_relay(&self) -> bool {
+        matches!(self.route, Route::Relay(_))
+    }
+}
 pub type Peers = Arc<Mutex<HashMap<u64, Peer>>>;
 
 #[derive(Clone)]

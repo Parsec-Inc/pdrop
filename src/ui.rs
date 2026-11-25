@@ -1,6 +1,7 @@
 use crate::{
     App,
     net::{Peer, State},
+    relay::Link,
 };
 use eframe::egui::{
     self, Align, Align2, Color32, ColorImage, FontId, Key, Layout, Mesh, Pos2, Rect, RichText,
@@ -560,8 +561,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     egui::Panel::top("top")
         .frame(pixel_frame(6.0 * S))
         .show_separator_line(false)
-        .show(ui, |ui| header(ui, app, peers.len()));
+        .show(ui, |ui| header(ui, app, peers));
     firewall_bar(ui, app);
+    relay_bar(ui, app);
     egui::Panel::bottom("bottom")
         .frame(pixel_frame(10.0 * S))
         .show_separator_line(false)
@@ -593,8 +595,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         });
 }
 
-fn header(ui: &mut egui::Ui, app: &App, n: usize) {
+fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) {
     let acc = app.acc();
+    let n = peers.len();
+    // com alguém vindo pelo relay, "por perto" deixa de ser verdade
+    let near = if peers.iter().any(Peer::via_relay) {
+        "no radar"
+    } else {
+        "por perto"
+    };
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(64.0 * S, 16.0 * S), Sense::hover());
         app.sp
@@ -611,10 +620,18 @@ fn header(ui: &mut egui::Ui, app: &App, n: usize) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let r = match n {
                 0 => format!("procurando{:<3}", ".".repeat((app.anim * 2.0) as usize % 4)),
-                1 => "1 por perto".to_string(),
-                n => format!("{n} por perto"),
+                n => format!("{n} {near}"),
             };
             ui.label(txt(r, MUTED));
+            if let Some(status) = &app.relay {
+                let (text, col) = match &*status.lock().unwrap() {
+                    Link::Connecting => ("relay conectando…", MUTED),
+                    Link::Up => ("relay conectado", MUTED),
+                    Link::Down(_) => ("relay sem conexão", WARN),
+                    Link::Off(_) => ("relay desligado", WARN),
+                };
+                ui.label(txt(text, col));
+            }
             if let Some((_, name, _)) = &app.bridge {
                 ui.label(txt(format!("ponte para {name}"), acc));
             }
@@ -644,6 +661,24 @@ fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
                     app.flash("copiado");
                 }
             });
+        });
+}
+
+/// o motivo da falha fica à vista: quem abre pelo menu não vê o terminal
+fn relay_bar(ui: &mut egui::Ui, app: &App) {
+    let Some(status) = &app.relay else {
+        return;
+    };
+    let text = match &*status.lock().unwrap() {
+        Link::Down(why) => format!("relay: {why}. Tentando de novo; a rede local segue normal."),
+        Link::Off(why) => format!("relay desligado: {why}"),
+        Link::Connecting | Link::Up => return,
+    };
+    egui::Panel::top("relay")
+        .frame(pixel_frame(4.0 * S))
+        .show_separator_line(false)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| ui.label(txt(text, WARN)));
         });
 }
 
@@ -716,7 +751,7 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let place = |q: &Peer| {
         at(
             angle(q.id),
-            if q.rtt.is_some_and(|ms| ms > 15.0) {
+            if q.via_relay() || q.rtt.is_some_and(|ms| ms > 15.0) {
                 0.83
             } else {
                 0.5
@@ -888,20 +923,10 @@ fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             DIM,
             gone,
         );
-        let tags = format!(
-            "{}{}",
-            if app.trusted(q.uid) { "*" } else { "" },
-            if app.marked.contains(&q.id) { "+" } else { "" }
-        );
-        let name = if tags.is_empty() {
-            q.name.clone()
-        } else {
-            format!("{tags} {}", q.name)
-        };
         p.text(
             snap(pos + vec2(0.0, 5.0 * S)),
             Align2::CENTER_TOP,
-            name,
+            labeled(app, q),
             font.clone(),
             c(lab),
         );
@@ -1548,6 +1573,16 @@ fn tagged(app: &App, q: &Peer) -> String {
     }
 }
 
+/// nome no radar e na constelação, dizendo quem vem pelo relay
+fn labeled(app: &App, q: &Peer) -> String {
+    let name = tagged(app, q);
+    if q.via_relay() {
+        format!("{name} · relay")
+    } else {
+        name
+    }
+}
+
 fn gone(q: &Peer) -> f64 {
     ((q.seen.elapsed().as_secs_f64() - 4.0) / 2.0).clamp(0.0, 1.0)
 }
@@ -1687,7 +1722,17 @@ fn grid(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
                         1
                     }
                 });
-                for b in 0..4 {
+                if q.via_relay() {
+                    p.text(
+                        snap(pos2(r.center().x, r.bottom() - 15.0 * S)),
+                        Align2::CENTER_TOP,
+                        "relay",
+                        font.clone(),
+                        c(lerp(MUTED, DIM, fade)),
+                    );
+                }
+                let bars = if q.via_relay() { 0 } else { 4 };
+                for b in 0..bars {
                     let h = 2.0 * (b + 1) as f32;
                     let br = Rect::from_min_size(
                         pos2(
@@ -1846,7 +1891,7 @@ fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         p.text(
             snap(pos + vec2(0.0, 6.0 * S)),
             Align2::CENTER_TOP,
-            tagged(app, q),
+            labeled(app, q),
             font.clone(),
             c(lab),
         );

@@ -64,6 +64,19 @@ pub struct Me {
     pub policy: Arc<Policy>,
 }
 
+/// como anda a conexão de controle, para a janela mostrar
+#[derive(Clone, Debug)]
+pub enum Link {
+    Connecting,
+    Up,
+    /// caiu ou não conectou; continua tentando
+    Down(String),
+    /// configuração inválida: nem tenta
+    Off(String),
+}
+
+pub type Status = Arc<Mutex<Link>>;
+
 /// recebe a transferência de um túnel que outro aparelho abriu até nós
 pub type Incoming = Arc<dyn Fn(TcpStream) + Send + Sync>;
 
@@ -72,8 +85,10 @@ pub fn room_of(secret: &str) -> String {
     blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
 }
 
-pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) {
+pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Status {
     let cfg = Arc::new(cfg);
+    let status = Status::new(Mutex::new(Link::Connecting));
+    let link = status.clone();
     thread::spawn(move || {
         let mut wait = Duration::from_secs(1);
         let mut last_error = String::new();
@@ -83,6 +98,7 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) {
                 Ok(s) => {
                     eprintln!("relay: conectado a {}", cfg.addr);
                     last_error.clear();
+                    *link.lock().unwrap() = Link::Up;
                     let e = session(s, &cfg, &me, &peers, &incoming);
                     drop_relay_peers(&peers, None);
                     e
@@ -90,6 +106,7 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) {
                 Err(e) => e,
             }
             .to_string();
+            *link.lock().unwrap() = Link::Down(error.clone());
             if error != last_error {
                 eprintln!("relay: {error}; tentando de novo");
                 last_error = error;
@@ -102,6 +119,7 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) {
             wait = (wait * 2).min(MAX_BACKOFF);
         }
     });
+    status
 }
 
 fn dial_tcp(addr: &str) -> io::Result<TcpStream> {
@@ -370,6 +388,30 @@ mod tests {
         let p = &g[&2];
         assert!(matches!(p.route, Route::Relay(_)));
         assert_eq!((p.name.as_str(), p.color, p.uid), ("aparelho 2", 3, 102));
+    }
+
+    #[test]
+    fn status_follows_the_connection() {
+        let start = |addr: &str| {
+            watch(
+                config(addr),
+                me(1, net::VIS_ALL),
+                Peers::default(),
+                Arc::new(|_| {}),
+            )
+        };
+        let up = start(&start_server());
+        until("conectado", || matches!(*up.lock().unwrap(), Link::Up));
+        // porta que acabou de ser liberada: ninguém escutando
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let down = start(&closed);
+        until("sem conexão", || {
+            matches!(*down.lock().unwrap(), Link::Down(_))
+        });
     }
 
     #[test]
