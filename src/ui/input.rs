@@ -18,6 +18,7 @@ pub(super) enum Act {
     SetColor(u8),
     SetIcon(u8),
     OpenRename,
+    OpenSearch,
     SetName,
     CutBridges,
     Trust,
@@ -51,17 +52,24 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
                 app.sel = Some(peers[(i + d).rem_euclid(peers.len() as isize) as usize].id);
             }
         }
-        Act::OpenInput if app.sel.is_some() => (app.input, app.focus) = (Some(String::new()), true),
+        Act::OpenInput if app.sel.is_some() => {
+            (app.input, app.search, app.focus) = (Some(String::new()), None, true)
+        }
         Act::OpenInput => {}
         Act::Send => app.send_input(peers),
         Act::Clip => app.clip_once(peers),
         Act::Bridge => app.toggle_bridge(peers),
-        Act::PickColor => (app.pick, app.pick_icon) = (Some(app.color), None),
-        Act::PickIcon => (app.pick_icon, app.pick) = (Some(app.icon), None),
+        Act::PickColor => (app.pick, app.pick_icon, app.search) = (Some(app.color), None, None),
+        Act::PickIcon => (app.pick_icon, app.pick, app.search) = (Some(app.icon), None, None),
         Act::SetColor(i) => app.set_color(i),
         Act::SetIcon(i) => app.set_icon(i),
-        Act::OpenRename => (app.rename, app.focus) = (Some(app.me.clone()), true),
+        Act::OpenRename => (app.rename, app.search, app.focus) = (Some(app.me.clone()), None, true),
         Act::SetName => app.set_name(),
+        Act::OpenSearch if app.input.is_none() => {
+            (app.rename, app.pick, app.pick_icon) = (None, None, None);
+            (app.search, app.focus) = (Some(String::new()), true);
+        }
+        Act::OpenSearch => {}
         Act::CutBridges => {
             app.grants.lock().unwrap().clear();
             app.flash("pontes recebidas cortadas");
@@ -86,6 +94,7 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::Cancel
             if app.input.is_none()
                 && app.rename.is_none()
+                && app.search.is_none()
                 && app.pick.is_none()
                 && app.pick_icon.is_none()
                 && app.hist_sel.is_none()
@@ -94,6 +103,7 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
             app.marked.clear()
         }
         Act::Cancel => {
+            app.search = None;
             (
                 app.input,
                 app.rename,
@@ -184,6 +194,7 @@ pub(super) fn keys(ctx: &egui::Context, app: &App) -> Act {
             _ if k(Key::B) => Act::Bridge,
             _ if k(Key::X) => Act::CutBridges,
             _ if k(Key::R) => Act::OpenRename,
+            _ if k(Key::F) => Act::OpenSearch,
             _ if k(Key::T) => Act::Trust,
             _ if k(Key::M) => Act::Vis,
             _ if k(Key::D) => Act::View,

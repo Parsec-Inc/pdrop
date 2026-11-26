@@ -8,7 +8,6 @@ use std::{
     time::Duration,
 };
 
-// Devolve um flag: ligue-o para fechar o prompt (pedido já respondido no app).
 pub fn notify(body: String, ask: Option<(u64, Sender<Msg>)>) -> Arc<AtomicBool> {
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = cancel.clone();
@@ -59,9 +58,12 @@ pub fn notify(body: String, ask: Option<(u64, Sender<Msg>)>) -> Arc<AtomicBool> 
         #[cfg(not(any(target_os = "macos", windows)))]
         let (mut c, parse) = {
             let mut c = std::process::Command::new("notify-send");
-            c.args(["-a", "pdrop", "-u", "critical"]);
+            c.args(["-a", "pdrop", "-h", "int:transient:1"]);
             if asking {
-                c.args(["-w", "-A", "y=Aceitar", "-A", "n=Recusar"]);
+                c.args(["-t", "120000", "-w"]);
+                c.args(["-A", "y=Aceitar", "-A", "n=Recusar"]);
+            } else {
+                c.args(["-t", "6000"]);
             }
             c.args(["pdrop", &body.replace('&', "&amp;").replace('<', "&lt;")]);
             (

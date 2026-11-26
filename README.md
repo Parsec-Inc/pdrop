@@ -60,6 +60,7 @@ Run `pdrop` on two or more machines on the same network and they appear as blips
 - **Clipboard share** (`v`) — push your whole clipboard to a peer once; it lands in their clipboard with the same type (text, or images with `wl-clipboard`/`xclip`).
 - **Clipboard bridge** (`b`) — keep it on and *everything you copy* flows to the peer automatically, like a shared clipboard. The recipient approves once per session; repeat copies arrive without asking.
 - **Live radar** — animated sweeping radar with blips for each peer, colored by their chosen accent, orbiting a pixel-art icon, pulsing when the sweep passes. Ping-based RTT places close peers on the inner ring.
+- **No overlap** — peers never cover each other on the radar or constellation. When they don't all fit, the extra ones are placed farther from the center, off screen: drag the map, step through peers with `←/→`, or search by name (`f`).
 - **Identity** — pick your display color (`c`), icon (`i`), and name (`r`); all persisted in `~/.config/pdrop` and broadcast so others see them.
 - **Accept/refuse prompts** — incoming transfers ask y/n in-app, plus a desktop notification (`notify-send` on Linux, `osascript` on macOS) so you notice even when the window is in the background.
 - **Safe by construction** — incoming file names are stripped to the last path component, existing files are never overwritten (`photo.jpg`, `photo (1).jpg`, …), failed writes delete the partial file, text messages are capped at 1 MiB and clipboard payloads at 64 MiB.
@@ -139,7 +140,7 @@ pdrop send [--to NAME] [--peer IP]... [--as NAME] [--relay HOST:PORT] [--room SE
 | `--peer`, `-p IP` | Also send discovery beacons directly to this IP. Repeat the flag for several peers. Useful on networks that filter broadcast/multicast — just point it at the other machine's IP. |
 | `--dir`, `-d FOLDER` | Where received files go instead of `~/Downloads` (receive rules still apply first). |
 | `--relay HOST:PORT`, `--room SECRET` | Reach devices on other networks (see [Connecting to a relay](#connecting-to-a-relay)). |
-| `--calm` | Slower, quieter animation. Also slows down further while you're typing or a prompt is pending. |
+| `--calm` | Slower, quieter animation; devices and the map camera jump straight to their new spot. Also slows down further while you're typing or a prompt is pending. |
 
 With no valid arguments, it prints the usage line. Everything else is done inside the window, or with `pdrop send` (see above).
 
@@ -168,6 +169,7 @@ With no valid arguments, it prints the usage line. Everything else is done insid
 | `p` | Open the received-clipboard history (`↑/↓`, `enter` to restore) |
 | `g` | Open or close the history (`↑/↓` browse, `enter` show in folder, `e` resend) |
 | `y` / `n` | Accept / refuse an incoming transfer or bridge request |
+| `f` | Search a peer by name (`↑/↓` cycle matches, `enter` close); the radar and constellation move to it |
 | `w` | Open or close the relay screen (also the *Relay* button) |
 | `esc` | Cancel the open prompt or picker |
 | `q`, `ctrl+c` | Quit |

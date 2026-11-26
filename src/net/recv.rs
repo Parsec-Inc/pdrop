@@ -212,7 +212,6 @@ fn recv_files(
         let &[rel, size, mtime] = f.as_slice() else {
             return Err(bad());
         };
-        // sufixo `z` no mtime = remetente oferece zstd (remetentes antigos nunca oferecem; receptores antigos tratam como texto opaco)
         let (mtime, zip) = mtime
             .strip_suffix('z')
             .map_or((mtime, false), |m| (m, true));
@@ -236,7 +235,6 @@ fn recv_files(
         };
         let want = size - off;
         let got = if zip {
-            // +1 limita bomba de descompressão e força ler o fim do quadro (EOF) antes do hash
             let dec = zstd::Decoder::with_buffer(&mut *r)?.single_frame();
             pump(
                 &mut HashRead {
@@ -323,7 +321,6 @@ pub(super) fn rel_components(rel: &str) -> Option<Vec<String>> {
         .map(|c| {
             c.chars()
                 .filter(|c| !c.is_control() && *c != '\\')
-                // no Windows, `C:x` num join descarta a pasta base (e `a:b` grava num fluxo oculto do NTFS)
                 .map(|c| if cfg!(windows) && c == ':' { '_' } else { c })
                 .collect()
         })

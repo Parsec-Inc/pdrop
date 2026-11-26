@@ -158,7 +158,6 @@ impl App {
         self.flash(format!("reenviando para {}", p.name));
     }
 
-    // Responde só o pedido `id`; se já foi resolvido (ex.: pela notificação), ignora.
     pub(crate) fn answer(&mut self, id: u64, yes: bool) {
         if let Some(i) = self.pending.iter().position(|(t, _)| t.id == id) {
             if let Some((_, r)) = self.pending.remove(i) {
@@ -168,6 +167,19 @@ impl App {
                 c.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    pub(crate) fn search_pick(&mut self, peers: &[Peer], step: isize) {
+        self.sel = pick_hit(&self.search_hits(peers), self.sel, step).or(self.sel);
+    }
+
+    pub(crate) fn search_hits(&self, peers: &[Peer]) -> Vec<u64> {
+        let q = self.search.as_deref().unwrap_or("").trim().to_lowercase();
+        peers
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&q))
+            .map(|p| p.id)
+            .collect()
     }
 
     pub(crate) fn send_input(&mut self, peers: &[Peer]) {
@@ -265,5 +277,30 @@ impl App {
             save_setting("nome", &n);
             self.me = n;
         }
+    }
+}
+
+fn pick_hit(hits: &[u64], sel: Option<u64>, step: isize) -> Option<u64> {
+    let last = hits.len().checked_sub(1)?;
+    let i = match hits.iter().position(|&id| Some(id) == sel) {
+        Some(i) => (i as isize + step).rem_euclid(hits.len() as isize) as usize,
+        None if step < 0 => last,
+        None => 0,
+    };
+    Some(hits[i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_hit;
+
+    #[test]
+    fn search_steps_through_hits() {
+        let hits = [10, 20, 30];
+        assert_eq!(pick_hit(&hits, Some(20), 0), Some(20));
+        assert_eq!(pick_hit(&hits, Some(30), 1), Some(10));
+        assert_eq!(pick_hit(&hits, Some(99), 1), Some(10));
+        assert_eq!(pick_hit(&hits, Some(99), -1), Some(30));
+        assert_eq!(pick_hit(&[], Some(99), 1), None);
     }
 }

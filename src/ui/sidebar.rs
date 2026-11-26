@@ -91,6 +91,10 @@ pub(super) fn transfers(ui: &mut egui::Ui, app: &App) {
                                     MUTED,
                                 ));
                             }
+                            State::Done(_) if t.up && t.kind == 't' => {
+                                ui.label(txt("ok · enviado", OK));
+                                message(ui, &t.src, false);
+                            }
                             State::Done(m) => {
                                 let pre = if !t.up && t.kind == 'f' {
                                     "salvo em "
@@ -120,13 +124,26 @@ fn eta(s: u64) -> String {
     }
 }
 
-pub(super) fn history(ui: &mut egui::Ui, app: &App) {
+fn message(ui: &mut egui::Ui, text: &str, open: bool) {
+    let max = if open { usize::MAX } else { 80 };
+    let mut s: String = text.chars().take(max).collect();
+    if !open {
+        s = s.replace(['\n', '\r', '\t'], " ");
+    }
+    if s.len() < text.len() {
+        s.push('…');
+    }
+    ui.add(egui::Label::new(s).wrap().selectable(open));
+}
+
+pub(super) fn history(ui: &mut egui::Ui, app: &mut App) {
     let acc = app.acc();
     ui.label(txt("HISTÓRICO", MUTED));
     ui.add_space(4.0 * S);
     if app.hist.is_empty() {
         ui.label(txt("Nada por aqui ainda.", FG));
     }
+    let mut pick = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -162,8 +179,14 @@ pub(super) fn history(ui: &mut egui::Ui, app: &App) {
                             (format!("falhou · {}", ago(r.ts)), WARN)
                         };
                         ui.label(txt(m, col));
+                        if r.kind == 't' && !r.detail.is_empty() {
+                            message(ui, &r.detail, sel);
+                        }
                     });
                 });
+                if row.response.interact(Sense::click()).clicked() {
+                    pick = Some(i);
+                }
                 if sel {
                     ui.painter().rect_stroke(
                         row.response.rect.expand(2.0 * S),
@@ -171,11 +194,18 @@ pub(super) fn history(ui: &mut egui::Ui, app: &App) {
                         Stroke::new(S, c(acc)),
                         egui::StrokeKind::Outside,
                     );
-                    row.response.scroll_to_me(None);
+                    let seen = ui.make_persistent_id("histsel");
+                    if ui.data_mut(|d| d.get_temp::<usize>(seen)) != Some(i) {
+                        ui.data_mut(|d| d.insert_temp(seen, i));
+                        row.response.scroll_to_me(None);
+                    }
                 }
                 ui.add_space(5.0 * S);
             }
         });
+    if pick.is_some() {
+        app.hist_sel = pick;
+    }
 }
 
 fn ago(ts: u64) -> String {

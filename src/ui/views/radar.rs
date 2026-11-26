@@ -1,4 +1,4 @@
-use super::{Raster, angle, labeled, out_expo};
+use super::{Raster, camera, labeled, layout, offscreen, out_expo};
 use crate::{
     App,
     net::{Peer, State},
@@ -12,32 +12,24 @@ use std::f64::consts::TAU;
 pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let acc = app.acc();
     let t = app.anim;
-    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click());
+    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = Rect::from_min_max(snap(resp.rect.min), snap(resp.rect.max));
     let (w, h) = ((rect.width() / S) as usize, (rect.height() / S) as usize);
     if w < 8 || h < 8 {
         return;
     }
-    let (cx, cy) = (w as i32 / 2, h as i32 / 2);
     let r = ((w.min(h) as f64 / 2.0) - 20.0).max(30.0);
     let sweep = -(t * 1.1);
-    let at = |ang: f64, k: f64| {
-        (
-            cx + (r * k * ang.cos()).round() as i32,
-            cy - (r * k * ang.sin()).round() as i32,
-        )
-    };
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
-    let place = |q: &Peer| {
-        at(
-            angle(q.id),
-            if q.via_relay() || q.rtt.is_some_and(|ms| ms > 15.0) {
-                0.83
-            } else {
-                0.5
-            },
-        )
-    };
+    let spots = layout(&p, peers, (w, h), (r, r), |q| {
+        if q.via_relay() || q.rtt.is_some_and(|ms| ms > 15.0) {
+            0.85
+        } else {
+            0.5
+        }
+    });
+    let ((cx, cy), placed, hidden) = camera(app, &resp, &spots, (w, h));
+    let place = |q: &Peer| placed[&q.id];
     let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let busy: Vec<_> = app
         .xfers
@@ -102,9 +94,11 @@ pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
 
     let mut labels = vec![];
     for q in peers {
-        let ang = angle(q.id);
         let pc = COLORS[q.color as usize % COLORS.len()].1;
         let at_q = place(q);
+        let ang = ((cy - at_q.1) as f64)
+            .atan2((at_q.0 - cx) as f64)
+            .rem_euclid(TAU);
         let pos = scr(at_q);
         let sel = app.sel == Some(q.id);
         let since = (ang - sweep).rem_euclid(TAU);
@@ -211,6 +205,8 @@ pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             c(lab),
         );
     }
+
+    offscreen(&p, rect, hidden);
 
     let ctr = scr((cx, cy));
     p.text(
