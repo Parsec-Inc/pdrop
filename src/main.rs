@@ -3,6 +3,8 @@
 mod clip;
 mod firewall;
 mod net;
+mod relay;
+mod relays;
 mod secure;
 mod ui;
 
@@ -44,6 +46,8 @@ pub struct App {
     pub sp: ui::Sprites,
     pub focus: bool,
     pub firewall: firewall::Shared,
+    pub relay: relays::Control,
+    pub relay_ui: Option<ui::RelayPanel>,
     pub uid: u128,
     pub policy: Arc<Policy>,
     pub hist: Vec<Rec>,
@@ -492,7 +496,7 @@ impl App {
             .is_some_and(|(id, ..)| !peers.iter().any(|p| p.id == *id))
         {
             self.stop_bridge();
-            self.flash("ponte encerrada: o aparelho saiu da rede");
+            self.flash("ponte encerrada: o aparelho saiu do radar");
         }
         if !peers.iter().any(|p| Some(p.id) == self.sel) {
             self.sel = peers.first().map(|p| p.id);
@@ -618,8 +622,12 @@ pub fn home() -> PathBuf {
 
 pub const VIEWS: [&str; 3] = ["sonar", "seleção", "constelação"];
 
+fn config_dir() -> PathBuf {
+    home().join(".config/pdrop")
+}
+
 fn setting_path(k: &str) -> PathBuf {
-    home().join(".config/pdrop").join(k)
+    config_dir().join(k)
 }
 
 fn load_setting(k: &str) -> Option<String> {
@@ -642,6 +650,45 @@ fn saved_peers() -> Vec<std::net::IpAddr> {
 fn save_setting(k: &str, v: &str) {
     let p = setting_path(k);
     let _ = std::fs::create_dir_all(p.parent().unwrap()).and_then(|_| std::fs::write(p, v));
+}
+
+fn replace_file(p: &std::path::Path, v: &str, private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    let tmp = p.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let write = || {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        }
+        let mut f = o.open(&tmp)?;
+        if private {
+            owner_only(&tmp)?;
+        }
+        f.write_all(v.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, p)
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+fn owner_only(_p: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(_p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 const HIST_MAX: usize = 200;
@@ -829,8 +876,11 @@ fn window_icon() -> eframe::egui::IconData {
     }
 }
 
-const USAGE: &str = "uso: pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm]
-     pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|- ...
+const USAGE: &str = "uso: pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm] [--relay HOST:PORTA] [--room SEGREDO]
+     pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room SEGREDO] CAMINHO|TEXTO|- ...
+relay (aparelhos em outra rede): configure na janela (botão Relay), que guarda vários em
+~/.config/pdrop/relays; --relay e --room também são salvos por ela. Valem ainda PDROP_RELAY e
+PDROP_ROOM. Pela janela ou pelo ambiente a senha não fica no histórico do shell
 recebidos vão para ~/Downloads (ou --dir); regras de destino em ~/.config/pdrop/destinos;
 IPs fixos (VPN/Tailscale) em ~/.config/pdrop/peers, um por linha";
 
@@ -844,11 +894,20 @@ fn proc_id() -> u64 {
 
 fn cli_send(args: Vec<String>) -> i32 {
     let (mut to, mut name_as, mut direct, mut inputs) = (None, None, saved_peers(), vec![]);
+    let mut flags = relays::Flags::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--to" | "-t" => to = it.next(),
             "--as" => name_as = it.next(),
+            "--relay" => match it.next() {
+                Some(a) => flags.addr = Some(a),
+                None => return usage(),
+            },
+            "--room" => match it.next() {
+                Some(s) => flags.room = Some(s),
+                None => return usage(),
+            },
             "--peer" | "-p" => match it.next().and_then(|ip| ip.parse::<std::net::IpAddr>().ok()) {
                 Some(ip) => direct.push(ip),
                 None => return usage(),
@@ -861,6 +920,14 @@ fn cli_send(args: Vec<String>) -> i32 {
     if inputs.is_empty() {
         return usage();
     }
+    let saved = relays::load(&config_dir());
+    let relay = match relays::resolve(&flags, &relays::Env::read(), &saved) {
+        Ok((r, _)) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
     let tmp = std::env::temp_dir().join(format!("pdrop-{}", std::process::id()));
     for i in inputs.iter_mut().filter(|i| *i == "-") {
         let file =
@@ -877,7 +944,7 @@ fn cli_send(args: Vec<String>) -> i32 {
         }
         *i = file.display().to_string();
     }
-    let code = cli_run(to, direct, inputs);
+    let code = cli_run(to, direct, relay, inputs);
     let _ = std::fs::remove_dir_all(tmp);
     code
 }
@@ -887,7 +954,21 @@ fn usage() -> i32 {
     2
 }
 
-fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String>) -> i32 {
+fn one_per_device(mut v: Vec<Peer>) -> Vec<Peer> {
+    v.sort_by_key(|p| std::cmp::Reverse(p.seen));
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(p.uid));
+    v
+}
+
+const LAN_GRACE: Duration = Duration::from_secs(3);
+
+fn cli_run(
+    to: Option<String>,
+    direct: Vec<std::net::IpAddr>,
+    relay: Option<relay::Config>,
+    inputs: Vec<String>,
+) -> i32 {
     let (key, uid) = load_identity();
     let me = load_setting("nome")
         .map(|n| net::clean(&n))
@@ -898,18 +979,35 @@ fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String
         ..Default::default()
     });
     let peers = Peers::default();
+    let id = proc_id();
     if let Err(e) = net::discover(
-        proc_id(),
+        id,
         uid,
         Arc::new(Mutex::new(me.clone())),
         0,
         Arc::new(AtomicU8::new(0)),
-        policy,
+        policy.clone(),
         peers.clone(),
         direct,
     ) {
         eprintln!("sem rede: {e}");
         return 1;
+    }
+    let with_relay = relay.is_some();
+    let wait = Duration::from_secs(if relay.is_some() { 8 } else { 6 });
+    if let Some(cfg) = relay {
+        relay::watch(
+            cfg,
+            relay::Me {
+                id,
+                uid: secure::id_of(&secure::generate().1),
+                name: Arc::new(Mutex::new(me.clone())),
+                color: Arc::new(AtomicU8::new(0)),
+                policy,
+            },
+            peers.clone(),
+            Arc::new(|_| {}),
+        );
     }
     let pick = |v: &[Peer]| -> Option<Peer> {
         let t = to.as_ref()?.to_lowercase();
@@ -918,12 +1016,24 @@ fn cli_run(to: Option<String>, direct: Vec<std::net::IpAddr>, inputs: Vec<String
             .or_else(|| v.iter().find(|p| p.name.to_lowercase().starts_with(&t)))
             .cloned()
     };
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let start = Instant::now();
+    let deadline = start + wait;
     let target = loop {
         std::thread::sleep(Duration::from_millis(200));
-        let v: Vec<Peer> = peers.lock().unwrap().values().cloned().collect();
+        let v: Vec<Peer> = peers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| !(matches!(p.route, net::Route::Relay(_)) && p.uid == uid))
+            .cloned()
+            .collect();
+        let v = one_per_device(v);
+        let found = pick(&v).filter(|p| {
+            start.elapsed() >= LAN_GRACE
+                || (!p.via_relay() && (!with_relay || p.fallback.is_some()))
+        });
         match (&to, v.as_slice()) {
-            (Some(_), _) if pick(&v).is_some() => break pick(&v),
+            (Some(_), _) if found.is_some() => break found,
             (None, _) if Instant::now() >= deadline => match v.as_slice() {
                 [p] => break Some(p.clone()),
                 [] => break None,
@@ -999,6 +1109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut direct = saved_peers();
     let mut calm = false;
     let mut out_dir = None;
+    let mut flags = relays::Flags::default();
     while let Some(a) = args.next() {
         if a == "--calm" {
             calm = true;
@@ -1010,11 +1121,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 direct.push(ip.parse().unwrap())
             }
             ("--dir" | "-d", Some(d)) => out_dir = Some(PathBuf::from(d)),
+            ("--relay", Some(a)) => flags.addr = Some(a),
+            ("--room", Some(s)) => flags.room = Some(s),
             _ => {
                 eprintln!("{USAGE}");
                 return Ok(());
             }
         }
+    }
+    let mut saved = relays::load(&config_dir());
+    let relay_start = match relays::resolve(&flags, &relays::Env::read(), &saved) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = relays::remember(&config_dir(), &flags, &mut saved) {
+        eprintln!("{e}");
     }
     let id = proc_id();
     let dir = out_dir.unwrap_or_else(|| {
@@ -1038,7 +1162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(net::VIS_ALL),
         ),
     });
-    let port = net::listen(dir, tx.clone(), grants.clone(), policy.clone())?;
+    let port = net::listen(dir.clone(), tx.clone(), grants.clone(), policy.clone())?;
     let color = load_color();
     let icon = load_icon();
     let shared_color = Arc::new(AtomicU8::new(color | icon << 3));
@@ -1053,6 +1177,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers.clone(),
         direct,
     )?;
+
+    let incoming: relay::Incoming = {
+        let (tx, grants, rules) = (tx.clone(), grants.clone(), policy.clone());
+        Arc::new(move |s| {
+            let _ = net::recv(s, &tx, &dir, &grants, &rules);
+        })
+    };
+    let relay = relays::Control::new(
+        config_dir(),
+        saved,
+        relay::Me {
+            id,
+            uid,
+            name: shared_name.clone(),
+            color: shared_color.clone(),
+            policy: policy.clone(),
+        },
+        peers.clone(),
+        incoming,
+        relay_start,
+    );
 
     let firewall = firewall::watch();
 
@@ -1110,6 +1255,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clip_sel: None,
                 marked: Default::default(),
                 firewall,
+                relay,
+                relay_ui: None,
                 view: load_setting("visao")
                     .and_then(|s| s.parse().ok())
                     .filter(|v| (*v as usize) < VIEWS.len())
@@ -1120,4 +1267,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn send_keeps_the_latest_session_of_each_device() {
+        use super::{Peer, net::Route};
+        let now = std::time::Instant::now();
+        let peer = |id, uid, age| Peer {
+            id,
+            name: "a".into(),
+            route: Route::Lan(([127, 0, 0, 1], 1).into()),
+            fallback: None,
+            seen: now - std::time::Duration::from_secs(age),
+            born: now,
+            rtt: None,
+            color: 0,
+            uid,
+        };
+        let v = super::one_per_device(vec![peer(1, 7, 3), peer(2, 7, 0), peer(3, 8, 1)]);
+        let ids: Vec<u64> = v.iter().map(|p| p.id).collect();
+        assert_eq!(ids, [2, 3]);
+    }
+
+    #[test]
+    fn replace_file_swaps_the_whole_file() {
+        let dir = std::env::temp_dir().join(format!("pdrop-replace-{}", std::process::id()));
+        let p = dir.join("relays");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, "um segredo antigo bem mais comprido").unwrap();
+        super::replace_file(&p, "novo", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "novo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "sobrou temporário"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

@@ -4,7 +4,7 @@
 
 **pdrop** is an [AirDrop](https://support.apple.com/explore/new/airdrop)-style sharing tool for your local network, wrapped in a live pixel-art **radar** window.
 
-Run `pdrop` on two or more machines on the same network and they appear as blips on each other's radar. Select a peer and drop files, free-form text, or your clipboard to them — they get a prompt, accept, and it lands in their `~/Downloads` (or their clipboard). No accounts, no servers, no cloud: everything travels directly over the LAN.
+Run `pdrop` on two or more machines on the same network and they appear as blips on each other's radar. Select a peer and drop files, free-form text, or your clipboard to them — they get a prompt, accept, and it lands in their `~/Downloads` (or their clipboard). No accounts, no cloud: on the LAN everything travels directly, with no server. For devices on other networks you can optionally run your own [relay](#relay-pdrop-relay).
 
 <p align="center"><img src="docs/assets/radar.png" alt="pdrop radar with three nearby devices" width="820"></p>
 
@@ -129,8 +129,8 @@ cargo run --release -- --name laptop
 ## Usage
 
 ```bash
-pdrop [--name NAME] [--peer IP]... [--dir FOLDER] [--calm]
-pdrop send [--to NAME] [--peer IP]... [--as NAME] PATH|TEXT|-...
+pdrop [--name NAME] [--peer IP]... [--dir FOLDER] [--calm] [--relay HOST:PORT] [--room SECRET]
+pdrop send [--to NAME] [--peer IP]... [--as NAME] [--relay HOST:PORT] [--room SECRET] PATH|TEXT|-...
 ```
 
 | Flag | Meaning |
@@ -138,13 +138,14 @@ pdrop send [--to NAME] [--peer IP]... [--as NAME] PATH|TEXT|-...
 | `--name`, `-n NAME` | Display name for this session only (overrides the saved one). |
 | `--peer`, `-p IP` | Also send discovery beacons directly to this IP. Repeat the flag for several peers. Useful on networks that filter broadcast/multicast — just point it at the other machine's IP. |
 | `--dir`, `-d FOLDER` | Where received files go instead of `~/Downloads` (receive rules still apply first). |
+| `--relay HOST:PORT`, `--room SECRET` | Reach devices on other networks (see [Connecting to a relay](#connecting-to-a-relay)). |
 | `--calm` | Slower, quieter animation. Also slows down further while you're typing or a prompt is pending. |
 
 With no valid arguments, it prints the usage line. Everything else is done inside the window, or with `pdrop send` (see above).
 
 ### Starting out
 
-1. Run `pdrop` on both machines (same network).
+1. Run `pdrop` on both machines (same network, or the same [relay room](#connecting-to-a-relay)).
 2. Each appears on the other's radar within a couple of seconds. Peers fade out after ~6 s of silence and disappear; new ones announce with an expanding ring.
 3. Move the selection with `←/→` (or `h/l`, `Tab`).
 
@@ -167,6 +168,7 @@ With no valid arguments, it prints the usage line. Everything else is done insid
 | `p` | Open the received-clipboard history (`↑/↓`, `enter` to restore) |
 | `g` | Open or close the history (`↑/↓` browse, `enter` show in folder, `e` resend) |
 | `y` / `n` | Accept / refuse an incoming transfer or bridge request |
+| `w` | Open or close the relay screen (also the *Relay* button) |
 | `esc` | Cancel the open prompt or picker |
 | `q`, `ctrl+c` | Quit |
 
@@ -180,7 +182,7 @@ The bottom bar shows context-sensitive hints for whatever is happening (prompt o
 
 ## How it works
 
-Everything is peer-to-peer on the LAN; there is no server anywhere.
+On the LAN everything is peer-to-peer, with no server. The optional [relay](#relay-pdrop-relay) only introduces devices on other networks and forwards their encrypted bytes.
 
 - **Discovery** — a beacon `PDROP3|<id>|<port>|<color+icon>|<visibility>|<uid>|<name>` is broadcast over UDP port **47474** every 1.5 s. Because many Wi-Fi APs filter broadcast but pass unicast, pdrop also sweeps every host in its IPv4 subnets (up to /22) with 2 ms pacing, and `--peer` adds unicast targets. When a machine sees a *new* beacon it replies with its own beacon in unicast, so only one side needs to know the other's address. Peers also exchange `PING`/`PONG` to measure smoothed RTT.
 - **Transfer** — a TCP connection to the peer's port **47475** (falls back to an ephemeral port, which the beacon advertises). Protocol is deliberately simple, one line then bytes:
@@ -202,8 +204,11 @@ Everything is peer-to-peer on the LAN; there is no server anywhere.
 
 ## Privacy & safety notes
 
-- Transfers are encrypted and authenticated end to end; beacons are not (anyone on the network can see name, color, icon and uid unless you use the visibility modes).
+- Transfers are encrypted and authenticated end to end, over the LAN or the relay; beacons are not (on the LAN, anyone on the network can see name, color, icon and uid unless you use the visibility modes).
 - Anyone on the same network can see your pdrop beacon (name, color, icon) — that's how discovery works. Transfers are explicit and require the recipient's y/n, except text messages from peers you marked as trusted and bridge copies after a one-time grant (which you can cut with `x`).
+- **With a relay there is no TLS.** Whoever can watch the network between you and the relay, and whoever runs it, can read your IP, the room id and your beacons (name, color, icon, visibility, device ids). What you send, including file names and exact transfer headers, stays inside the encrypted channel, though the relay sees who connects to whom, when and how much.
+- **The room id is enough to join.** Someone who captures it does not need the secret: they can see the visible devices, send transfer requests (which still need your y/n), and take a device's place in the room: by replaying its captured membership key, or by joining with its uid while it is offline. They cannot pose as a trusted device or read your transfers. Names can be copied, so compare the pairing code before accepting from someone new. If the room may have leaked, switch every device to a new secret.
+- Visibility modes are applied by the receiving app. On the relay, an *invisible* device sends no beacon but is still a room member, reachable by anyone who has the room id and its uid; with *trusted only*, beacons still reach the whole room.
 - The clipboard bridge sends **everything you copy** while it's on. Password managers usually bypass the system clipboard, but double-check before bridging on a shared network.
 - Incoming file names are sanitized (no paths, no control characters) and payloads are size-capped, but as with any LAN transfer tool, run it among people you trust.
 
@@ -212,10 +217,57 @@ Everything is peer-to-peer on the LAN; there is no server anywhere.
 | Symptom | Try this |
 |---------|----------|
 | Peers never appear | Both sides must be on the same subnet. Firewalls often block UDP 47474/TCP 47475 — allow them, or use `--peer <other-ip>` on at least one side. Some guest/enterprise Wi-Fi isolates clients (AP isolation); no LAN tool can work across that. |
-| Radar shows the peer but sends fail | TCP 47475 is likely blocked, or the peer already has something listening there. |
+| Radar shows the peer but sends fail | On the LAN, TCP 47475 is likely blocked, or the peer already has something listening there. |
+| *relay sem conexão* (relay offline) | The bar under the header says why. Check the address and port, that `pdrop-relay` is running, and that its port is open. pdrop keeps retrying. |
+| Relay connected but no peers | Both devices need the same relay and the very same password, and the other one must not be *invisible*. |
 | "sem clipboard" flash | Install `wl-clipboard` (Wayland) or `xclip` (X11); on macOS this shouldn't happen. |
 | Clipboard bridge stops on its own | That's by design when the peer refuses, disconnects, or leaves — the header will say *ponte encerrada*. |
 | Two instances on the same machine | Fine on Linux (SO_REUSEPORT); they'll see each other. |
+
+## Relay (`pdrop-relay`)
+
+`pdrop-relay` is a small server for connecting devices that are not on the same network. It has no accounts and no global device list: a **room** is the `blake3` of a secret that only its members know (64 hex), and devices only see others in the same room. Use a random secret (128 bits or more); a short human-chosen phrase can be guessed. Content stays end-to-end encrypted (Noise): the relay forwards bytes and sees only who talks to whom and how much. See [Connecting to a relay](#connecting-to-a-relay) for the client side.
+
+```bash
+cargo build --release --bin pdrop-relay
+pdrop-relay --listen 0.0.0.0:443     # default
+```
+
+### Connecting to a relay
+
+Every device needs the same relay address and the same password (the room secret). It needs at least 16 characters, but length alone does not make it strong, so prefer a generated one.
+
+In the window, press **Relay** (or `w`, or click the relay status in the header) and then **Adicionar** (add). Give the server as `host:port` and the password; **Gerar** creates a random one and **Copiar** copies it so you can paste it on the other devices. You can save several relays, each with its own server and password. One at a time is in use: switch with **Usar**, turn it off with **Desativar**, no restart needed. The LAN still takes priority automatically.
+
+They are kept in `~/.config/pdrop/relays`, readable only by you on Unix (the passwords are stored as plain text). The single-relay files `relay` and `sala` used before are converted the next time the window opens.
+
+`--relay HOST:PORT` and `--room SECRET` work too: the window saves them as the relay in use, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the saved relay in use. A password passed with `--room` ends up in your shell history and process list.
+
+An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN; if the direct connection or its handshake fails (a firewall, or Wi-Fi client isolation), the transfer goes through the relay.
+
+**Protocol** — one line per message, ending in `\n`:
+
+| Message | Meaning |
+|---------|---------|
+| `HELLO <room> <uid> <key>` | Control connection. The relay answers `OK` (or closes). While a uid is in the room, only the same `key` (hex, up to 128 bits) can replace it; the app derives it from the device's private key and the room. |
+| `BEACON <text>` | Client → relay, every few seconds; forwarded to the room. The app uses 1.5 s and `<id>\|<color+icon>\|<visibility>\|<name>`. |
+| any other line, e.g. `PING` | Client → relay: ignored, but keeps the connection alive (used when invisible). A member that goes 30 s without completing a line is dropped. |
+| `BEACON <uid> <text>`, `GONE <uid>`, `INCOMING <token>` | Relay → client: presence of another member, a member left, someone wants to connect. |
+| `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
+| `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
+
+**Limits** — 2048 connections in total; per IP, 32 control connections, 32 tunnel connections, 32 still waiting to send their first line, and 8 rooms; 32 members per room, 1024 rooms; per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), with at most 10,000 entries tracked; 10 s for the first request line, 10 s for the target to accept, 120 s without traffic closes a tunnel. Presence messages for a member that reads too slowly are dropped. Room ids are never logged.
+
+**Known shortcuts**
+- The relay cannot verify that a uid belongs to whoever joins with it. The membership key stops other members from replacing a connected device, but one that joins with an offline device's uid keeps it out until it leaves. Transfers cannot be hijacked: the Noise handshake checks the uid.
+- The room and per-IP limits only raise the cost of filling the relay; someone with many addresses still can. Anyone who can reach it can create rooms.
+- Behind a shared NAT, users split the per-IP limits.
+- No TLS between client and relay: content is already encrypted, but the room id and beacons travel in clear (see [Privacy](#privacy--safety-notes)).
+- Two windows with the same identity (same user on one machine) replace each other in the room. `pdrop send` avoids this by joining with a throwaway uid.
+
+**Hosting on a VM** — 1 vCPU and 512 MB–1 GB of RAM are enough; bandwidth is what matters (every transferred byte enters and leaves the VM), so pick the provider by its outbound traffic allowance. Open a single TCP port (443 passes most restrictive networks) plus SSH, and run it under systemd with [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (unprivileged, `CAP_NET_BIND_SERVICE` only). Setting `net.ipv4.tcp_keepalive_time=60` helps drop dead sessions.
+
+**Container** — [`packaging/relay/Dockerfile`](packaging/relay/Dockerfile) builds a small non-root image listening on 4443. From the repository root: `docker build -f packaging/relay/Dockerfile -t pdrop-relay .`, then `docker run -d -p 4443:4443 pdrop-relay`. The per-IP limits need the real client address: check that your port publishing keeps it (in Docker Swarm, publish in `host` mode).
 
 ## Project layout
 
@@ -225,7 +277,10 @@ src/
 ├── net.rs     Discovery (UDP sweep/broadcast), file/folder protocol with resume + hashing, receive rules
 ├── secure.rs  Noise XX encrypted channel, device identity, pairing code
 ├── ui.rs      The egui radar: pixel-art sprites, blips, panels, footer
-└── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+├── relay.rs   Relay client: presence in a room and tunnels
+├── relays.rs  Saved relays: which one is in use, switching between them
+├── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+└── bin/pdrop-relay.rs  Relay server: rooms + TCP tunnel
 assets/        Aseprite sources and exported PNGs (font, icons, sprites)
 ```
 
@@ -235,7 +290,7 @@ Main dependencies: `eframe`/`egui` (window and rendering), `snow` (Noise encrypt
 
 ```bash
 cargo build --release
-cargo test        # loopback transfers (file, folder, text, resume, integrity), encrypted channel, routing, visibility
+cargo test        # loopback transfers (file, folder, text, resume, integrity), encrypted channel, routing, visibility, relay
 ```
 
 ## Status & license

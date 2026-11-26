@@ -4,7 +4,7 @@
 
 O **pdrop** é uma ferramenta de compartilhamento na rede local no estilo do [AirDrop](https://support.apple.com/explore/new/airdrop), com uma janela de **radar** em pixel art ao vivo.
 
-Abra o `pdrop` em duas ou mais máquinas na mesma rede e elas aparecem como pontos no radar uma da outra. Escolha alguém e envie arquivos, texto livre ou o seu clipboard: a pessoa recebe um pedido, aceita, e o conteúdo cai no `~/Downloads` dela (ou no clipboard). Sem contas, sem servidores, sem nuvem: tudo viaja direto pela rede local.
+Abra o `pdrop` em duas ou mais máquinas na mesma rede e elas aparecem como pontos no radar uma da outra. Escolha alguém e envie arquivos, texto livre ou o seu clipboard: a pessoa recebe um pedido, aceita, e o conteúdo cai no `~/Downloads` dela (ou no clipboard). Sem contas, sem nuvem: na rede local tudo viaja direto, sem servidor. Para aparelhos em outras redes, dá para rodar, se quiser, o seu próprio [relay](#relay-pdrop-relay).
 
 <p align="center"><img src="docs/assets/radar.png" alt="Radar do pdrop com três aparelhos por perto" width="820"></p>
 
@@ -129,8 +129,8 @@ cargo run --release -- --name laptop
 ## Uso
 
 ```bash
-pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm]
-pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|-...
+pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm] [--relay HOST:PORTA] [--room SEGREDO]
+pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room SEGREDO] CAMINHO|TEXTO|-...
 ```
 
 | Opção | Significado |
@@ -138,13 +138,14 @@ pdrop send [--to NOME] [--peer IP]... [--as NOME] CAMINHO|TEXTO|-...
 | `--name`, `-n NOME` | Nome exibido só nesta sessão (sobrepõe o salvo). |
 | `--peer`, `-p IP` | Também envia os beacons de descoberta direto para esse IP. Repita a opção para vários peers. Útil em redes que filtram broadcast/multicast — basta apontar para o IP da outra máquina. |
 | `--dir`, `-d PASTA` | Onde os arquivos recebidos caem, no lugar de `~/Downloads` (as regras de recebimento continuam valendo primeiro). |
+| `--relay HOST:PORTA`, `--room SEGREDO` | Alcança aparelhos em outras redes (veja [Conectando a um relay](#conectando-a-um-relay)). |
 | `--calm` | Animação mais lenta e discreta. Fica ainda mais lenta enquanto você digita ou há um pedido pendente. |
 
 Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentro da janela, ou com `pdrop send` (veja acima).
 
 ### Começando
 
-1. Abra o `pdrop` nas duas máquinas (mesma rede).
+1. Abra o `pdrop` nas duas máquinas (mesma rede, ou a mesma [sala no relay](#conectando-a-um-relay)).
 2. Cada uma aparece no radar da outra em poucos segundos. Os peers somem depois de ~6 s de silêncio; os novos chegam com um anel que se expande.
 3. Mova a seleção com `←/→` (ou `h/l`, `Tab`).
 
@@ -167,6 +168,7 @@ Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentr
 | `p` | Abre o histórico de clipboards recebidos (`↑/↓`, `enter` para restaurar) |
 | `g` | Abre ou fecha o histórico (`↑/↓` navegam, `enter` mostra na pasta, `e` reenvia) |
 | `y` / `n` | Aceita / recusa uma transferência ou pedido de ponte recebido |
+| `w` | Abre ou fecha a tela dos relays (também pelo botão *Relay*) |
 | `esc` | Cancela o prompt ou seletor aberto |
 | `q`, `ctrl+c` | Sai |
 
@@ -180,7 +182,7 @@ A barra de baixo mostra dicas conforme o contexto, para o que estiver acontecend
 
 ## Como funciona
 
-Tudo é ponto a ponto na rede local; não existe servidor em lugar nenhum.
+Na rede local tudo é ponto a ponto, sem servidor. O [relay](#relay-pdrop-relay), opcional, só apresenta aparelhos de outras redes e repassa os bytes cifrados deles.
 
 - **Descoberta** — um beacon `PDROP3|<id>|<porta>|<cor+ícone>|<visibilidade>|<uid>|<nome>` é enviado por broadcast UDP na porta **47474** a cada 1,5 s. Como muitos APs de Wi-Fi filtram broadcast mas deixam passar unicast, o pdrop também varre todos os hosts das suas sub-redes IPv4 (até /22) com intervalo de 2 ms, e o `--peer` adiciona alvos em unicast. Quando uma máquina vê um beacon *novo*, ela responde com o próprio beacon em unicast, então basta um lado conhecer o endereço do outro. Os peers também trocam `PING`/`PONG` para medir o RTT suavizado.
 - **Transferência** — uma conexão TCP na porta **47475** do peer (cai para uma porta efêmera, que o beacon divulga). O protocolo é de propósito simples, uma linha e depois os bytes:
@@ -202,8 +204,11 @@ Tudo é ponto a ponto na rede local; não existe servidor em lugar nenhum.
 
 ## Notas de privacidade e segurança
 
-- As transferências são criptografadas e autenticadas ponta a ponta; os beacons não são (qualquer um na rede vê nome, cor, ícone e uid, a menos que você use os modos de visibilidade).
+- As transferências são criptografadas e autenticadas ponta a ponta, pela rede local ou pelo relay; os beacons não são (na rede local, qualquer um vê nome, cor, ícone e uid, a menos que você use os modos de visibilidade).
 - Qualquer pessoa na mesma rede pode ver o seu beacon do pdrop (nome, cor, ícone) — é assim que a descoberta funciona. As transferências são explícitas e exigem o y/n de quem recebe, exceto mensagens de texto de peers que você marcou como confiáveis e cópias da ponte depois de uma liberação única (que você corta com `x`).
+- **Com relay não há TLS.** Quem observa a rede entre você e o relay, e quem o opera, consegue ler o seu IP, o id da sala e os seus beacons (nome, cor, ícone, visibilidade, ids do aparelho). O que você envia, incluindo nomes de arquivos e cabeçalhos da transferência, fica dentro do canal cifrado, mas o relay vê quem fala com quem, quando e o volume.
+- **O id da sala basta para entrar.** Quem o capturar não precisa do segredo: vê os aparelhos visíveis, pode mandar pedidos de transferência (que ainda exigem o seu y/n) e tomar o lugar de um aparelho na sala: repetindo a chave de membro capturada, ou entrando com o uid dele enquanto está desconectado. Não consegue se passar por um aparelho confiável nem ler as suas transferências. Nomes podem ser copiados, então compare o código de pareamento antes de aceitar de alguém novo. Se a sala pode ter vazado, troque o segredo em todos os aparelhos.
+- Os modos de visibilidade são aplicados pelo app que recebe. No relay, um aparelho *invisível* não manda beacon, mas continua membro da sala e alcançável por quem tiver o id da sala e o uid dele; em *só confiáveis*, os beacons ainda chegam à sala toda.
 - A ponte de clipboard envia **tudo o que você copia** enquanto está ligada. Gerenciadores de senha costumam contornar o clipboard do sistema, mas confira antes de ligar a ponte numa rede compartilhada.
 - Os nomes de arquivo recebidos são saneados (sem caminhos, sem caracteres de controle) e o tamanho do conteúdo é limitado, mas, como em qualquer ferramenta de transferência na rede local, use entre pessoas em quem você confia.
 
@@ -212,10 +217,57 @@ Tudo é ponto a ponto na rede local; não existe servidor em lugar nenhum.
 | Sintoma | O que tentar |
 |---------|----------|
 | Os peers nunca aparecem | Os dois lados precisam estar na mesma sub-rede. Firewalls costumam bloquear UDP 47474/TCP 47475 — libere essas portas, ou use `--peer <ip-do-outro>` em pelo menos um lado. Algumas redes Wi-Fi de visitantes/corporativas isolam os clientes (AP isolation); nenhuma ferramenta de rede local funciona assim. |
-| O radar mostra o peer, mas o envio falha | Provavelmente o TCP 47475 está bloqueado, ou o peer já tem outra coisa escutando nessa porta. |
+| O radar mostra o peer, mas o envio falha | Na rede local, provavelmente o TCP 47475 está bloqueado, ou o peer já tem outra coisa escutando nessa porta. |
+| *relay sem conexão* | A barra abaixo do cabeçalho diz o motivo. Confira o endereço e a porta, se o `pdrop-relay` está rodando e se a porta dele está aberta. O pdrop continua tentando. |
+| Relay conectado, mas sem peers | Os dois aparelhos precisam do mesmo relay e da mesma senha, e o outro não pode estar *invisível*. |
 | Aviso "sem clipboard" | Instale `wl-clipboard` (Wayland) ou `xclip` (X11); no macOS isso não deveria acontecer. |
 | A ponte de clipboard para sozinha | É de propósito quando o peer recusa, desconecta ou sai — o cabeçalho avisa *ponte encerrada*. |
 | Duas instâncias na mesma máquina | Funciona no Linux (SO_REUSEPORT); elas se enxergam. |
+
+## Relay (`pdrop-relay`)
+
+O `pdrop-relay` é um servidor pequeno para conectar aparelhos que não estão na mesma rede. Não tem contas nem lista global de aparelhos: uma **sala** é o `blake3` de um segredo que só os membros conhecem (64 hex), e cada aparelho só enxerga quem está na mesma sala. Use um segredo aleatório (128 bits ou mais); uma frase curta escolhida por uma pessoa pode ser adivinhada. O conteúdo continua cifrado ponta a ponta (Noise): o relay repassa bytes e só vê quem fala com quem e o volume. Veja [Conectando a um relay](#conectando-a-um-relay) para o lado do cliente.
+
+```bash
+cargo build --release --bin pdrop-relay
+pdrop-relay --listen 0.0.0.0:443     # padrão
+```
+
+### Conectando a um relay
+
+Todos os aparelhos precisam do mesmo endereço de relay e da mesma senha (o segredo da sala). Ela precisa de pelo menos 16 caracteres, mas só o tamanho não a torna forte, então prefira uma gerada.
+
+Na janela, aperte **Relay** (ou `w`, ou clique no estado do relay no cabeçalho) e depois **Adicionar**. Informe o servidor como `host:porta` e a senha; **Gerar** cria uma aleatória e **Copiar** a copia para você colar nos outros aparelhos. Dá para salvar vários relays, cada um com seu servidor e sua senha. Um por vez fica em uso: troque com **Usar** e desligue com **Desativar**, sem reiniciar. A rede local continua tendo prioridade, automaticamente.
+
+Eles ficam em `~/.config/pdrop/relays`, que no Unix só você pode ler (as senhas são guardadas em texto puro). Os arquivos `relay` e `sala`, de quando só cabia um relay, são convertidos na próxima vez que a janela abrir.
+
+`--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva como o relay em uso, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do relay salvo em uso. Uma senha passada com `--room` fica no histórico do shell e na lista de processos.
+
+Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN; se a conexão direta ou o handshake dela falhar (firewall, ou isolamento de clientes no Wi-Fi), a transferência segue pelo relay.
+
+**Protocolo** — uma linha por mensagem, terminada em `\n`:
+
+| Mensagem | Significado |
+|----------|-------------|
+| `HELLO <sala> <uid> <chave>` | Conexão de controle. O relay responde `OK` (ou fecha). Enquanto um uid está na sala, só a mesma `chave` (hex, até 128 bits) pode substituí-lo; o app a deriva da chave privada do aparelho e da sala. |
+| `BEACON <texto>` | Cliente → relay, a cada poucos segundos; repassado à sala. O app usa 1,5 s e `<id>\|<cor+ícone>\|<visibilidade>\|<nome>`. |
+| qualquer outra linha, ex.: `PING` | Cliente → relay: ignorada, mas mantém a conexão viva (usada no modo invisível). O membro que passa 30 s sem completar uma linha é derrubado. |
+| `BEACON <uid> <texto>`, `GONE <uid>`, `INCOMING <token>` | Relay → cliente: presença de outro membro, um membro saiu, alguém quer conectar. |
+| `DIAL <sala> <uid_alvo>` | Nova conexão pedindo um túnel até um membro. `OK` (daí em diante, bytes crus) ou `ERR`. |
+| `ACCEPT <sala> <uid> <token>` | Resposta do alvo ao `INCOMING`, em uma nova conexão. `OK`, e o mesmo túnel. |
+
+**Limites** — 2048 conexões no total; por IP, 32 conexões de controle, 32 de túnel, 32 ainda sem a primeira linha e 8 salas; 32 membros por sala, 1024 salas; por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), com no máximo 10.000 entradas acompanhadas; 10 s para a primeira linha chegar, 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Mensagens de presença para um membro que lê devagar demais são descartadas. Ids de sala nunca são registrados em log.
+
+**Atalhos conhecidos**
+- O relay não tem como conferir se um uid pertence a quem entra com ele. A chave de membro impede que outros membros substituam um aparelho conectado, mas quem entrar com o uid de um aparelho desconectado o mantém de fora até sair. Não dá para sequestrar uma transferência: o handshake Noise confere o uid.
+- Os limites de salas e por IP só encarecem lotar o relay; quem tem muitos endereços ainda consegue. Qualquer um que o alcance pode criar salas.
+- Atrás de um NAT compartilhado, os usuários dividem os limites por IP.
+- Sem TLS entre cliente e relay: o conteúdo já é cifrado, mas o id da sala e os beacons trafegam em claro (veja [Privacidade](#notas-de-privacidade-e-segurança)).
+- Duas janelas com a mesma identidade (mesmo usuário na mesma máquina) se substituem na sala. O `pdrop send` evita isso entrando com um uid descartável.
+
+**Hospedando numa VM** — 1 vCPU e 512 MB a 1 GB de RAM bastam; o que pesa é a banda (cada byte transferido entra e sai da VM), então escolha o provedor pela franquia de tráfego de saída. Abra uma única porta TCP (a 443 passa pela maioria das redes restritivas) mais o SSH, e rode sob systemd com [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (sem root, só `CAP_NET_BIND_SERVICE`). Configurar `net.ipv4.tcp_keepalive_time=60` ajuda a derrubar sessões mortas.
+
+**Contêiner** — o [`packaging/relay/Dockerfile`](packaging/relay/Dockerfile) gera uma imagem pequena, sem root, que escuta na 4443. Na raiz do repositório: `docker build -f packaging/relay/Dockerfile -t pdrop-relay .` e depois `docker run -d -p 4443:4443 pdrop-relay`. Os limites por IP precisam do endereço real do cliente: confira se a publicação da porta o preserva (no Docker Swarm, publique em modo `host`).
 
 ## Estrutura do projeto
 
@@ -225,7 +277,10 @@ src/
 ├── net.rs     Descoberta (varredura/broadcast UDP), protocolo de arquivos/pastas com retomada e hash, regras de recebimento
 ├── secure.rs  Canal criptografado Noise XX, identidade do aparelho, código de pareamento
 ├── ui.rs      O radar em egui: sprites em pixel art, pontos, painéis, rodapé
-└── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+├── relay.rs   Cliente do relay: presença na sala e túneis
+├── relays.rs  Relays salvos: qual está em uso e a troca entre eles
+├── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+└── bin/pdrop-relay.rs  Servidor relay: salas + túnel TCP
 assets/        Fontes em Aseprite e PNGs exportados (fonte, ícones, sprites)
 ```
 
@@ -235,7 +290,7 @@ Principais dependências: `eframe`/`egui` (janela e renderização), `snow` (cri
 
 ```bash
 cargo build --release
-cargo test        # transferências em loopback (arquivo, pasta, texto, retomada, integridade), canal criptografado, regras de destino, visibilidade
+cargo test        # transferências em loopback (arquivo, pasta, texto, retomada, integridade), canal criptografado, regras de destino, visibilidade, relay
 ```
 
 ## Status e licença

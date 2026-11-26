@@ -2,6 +2,7 @@
 name = "pdrop"
 version = "1.2.4"
 edition = "2024"
+default-run = "pdrop"
 description = "AirDrop-style sharing of files, text and clipboard on your local network"
 license = "MIT"
 repository = "https://github.com/Parsec-Inc/pdrop"

@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+umask 077
+dir=/etc/pdrop-deploy
+[ -t 0 ] || { echo "rode num terminal interativo" >&2; exit 1; }
+printf 'Cole a chave da API do Dokploy (não aparece na tela) e aperte Enter: '
+trap 'stty echo' EXIT
+stty -echo
+IFS= read -r key
+stty echo
+echo
+[ -n "$key" ] || { echo "nada foi digitado" >&2; exit 1; }
+tmp=$(mktemp "$dir/.key.XXXXXX")
+printf '%s\n' "$key" > "$tmp"
+chown root:pdrop-deploy "$tmp"
+chmod 640 "$tmp"
+mv "$tmp" "$dir/dokploy.key"
+echo "chave salva; conferindo (nada é alterado no Dokploy)"
+runuser -u pdrop-deploy -- /usr/local/bin/pdrop-deploy --check

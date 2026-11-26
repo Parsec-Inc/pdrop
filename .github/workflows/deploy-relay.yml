@@ -1,0 +1,42 @@
+name: deploy-relay
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/bin/pdrop-relay.rs
+      - packaging/relay/**
+      - .github/workflows/deploy-relay.yml
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-relay
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: relay-production
+    steps:
+      - name: Deploy
+        env:
+          SSH_KEY: ${{ secrets.RELAY_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.RELAY_DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.RELAY_DEPLOY_HOST }}
+        run: |
+          umask 077
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$dir/known_hosts"
+          ssh -T -i "$dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts" \
+            -o ConnectTimeout=20 -o ServerAliveInterval=15 "pdrop-deploy@$HOST"

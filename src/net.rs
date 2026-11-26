@@ -1,5 +1,5 @@
 use crate::{
-    clip,
+    clip, relay,
     secure::{self, Secure},
 };
 use socket2::{Domain, Protocol, Socket, Type};
@@ -43,15 +43,36 @@ pub struct Who {
 }
 
 #[derive(Clone)]
+pub enum Route {
+    Lan(SocketAddr),
+    Relay(Arc<relay::Config>),
+}
+
+impl Route {
+    pub fn lan_ip(&self) -> Option<IpAddr> {
+        match self {
+            Route::Lan(a) => Some(a.ip()),
+            Route::Relay(_) => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Peer {
     pub id: u64,
     pub name: String,
-    pub addr: SocketAddr,
+    pub route: Route,
+    pub fallback: Option<Arc<relay::Config>>,
     pub seen: Instant,
     pub born: Instant,
     pub rtt: Option<f64>,
     pub color: u8,
     pub uid: u128,
+}
+impl Peer {
+    pub fn via_relay(&self) -> bool {
+        matches!(self.route, Route::Relay(_))
+    }
 }
 pub type Peers = Arc<Mutex<HashMap<u64, Peer>>>;
 
@@ -170,7 +191,7 @@ pub fn discover(
                 .lock()
                 .unwrap()
                 .values()
-                .map(|p| p.addr.ip())
+                .filter_map(|p| p.route.lan_ip())
                 .collect();
             for ip in known {
                 send(ip, &beacon);
@@ -224,34 +245,10 @@ pub fn discover(
                     ) {
                         continue;
                     }
-                    let (now, addr) = (Instant::now(), SocketAddr::new(from.ip(), port));
-                    let is_new = {
-                        let mut g = peers.lock().unwrap();
-                        match g.get_mut(&pid) {
-                            Some(p) => {
-                                (p.name, p.addr, p.seen, p.color, p.uid) =
-                                    (clean(name), addr, now, col, puid);
-                                false
-                            }
-                            None => {
-                                g.insert(
-                                    pid,
-                                    Peer {
-                                        id: pid,
-                                        name: clean(name),
-                                        addr,
-                                        seen: now,
-                                        born: now,
-                                        rtt: None,
-                                        color: col,
-                                        uid: puid,
-                                    },
-                                );
-                                true
-                            }
-                        }
-                    };
-                    if is_new && !hidden {
+                    let (now, route) =
+                        (Instant::now(), Route::Lan(SocketAddr::new(from.ip(), port)));
+                    let new_on_lan = upsert(&peers, pid, clean(name), route, col, puid, now);
+                    if new_on_lan && !hidden {
                         let _ = reply.send_to(b2().as_bytes(), (from.ip(), DISCOVERY_PORT));
                     }
                 }
@@ -262,7 +259,58 @@ pub fn discover(
     Ok(())
 }
 
-fn shown(theirs: u8, mine: u8, trusted: bool) -> bool {
+const LAN_FRESH: Duration = Duration::from_secs(4);
+
+pub fn upsert(
+    peers: &Peers,
+    id: u64,
+    name: String,
+    route: Route,
+    color: u8,
+    uid: u128,
+    now: Instant,
+) -> bool {
+    let lan = matches!(route, Route::Lan(_));
+    let mut g = peers.lock().unwrap();
+    let Some(p) = g.get_mut(&id) else {
+        g.insert(
+            id,
+            Peer {
+                id,
+                name,
+                route,
+                fallback: None,
+                seen: now,
+                born: now,
+                rtt: None,
+                color,
+                uid,
+            },
+        );
+        return lan;
+    };
+    let was_lan = matches!(p.route, Route::Lan(_));
+    if !lan && p.uid != uid {
+        return false;
+    }
+    match &route {
+        Route::Relay(cfg) if was_lan && now.duration_since(p.seen) < LAN_FRESH => {
+            p.fallback = Some(cfg.clone());
+            return false;
+        }
+        Route::Relay(_) => (p.rtt, p.fallback) = (None, None),
+        Route::Lan(_) if p.uid != uid => p.fallback = None,
+        Route::Lan(_) => {
+            if let Route::Relay(cfg) = &p.route {
+                p.fallback = Some(cfg.clone());
+            }
+        }
+    }
+    (p.name, p.route, p.seen, p.color, p.uid) = (name, route, now, color, uid);
+    lan && !was_lan
+}
+
+pub fn shown(theirs: u8, mine: u8, trusted: bool) -> bool {
     trusted || (theirs != VIS_TRUSTED && mine != VIS_TRUSTED)
 }
 
@@ -346,7 +394,7 @@ impl<R: Read> Read for HashRead<'_, R> {
     }
 }
 
-fn recv(
+pub fn recv(
     s: TcpStream,
     tx: &Sender<Msg>,
     dir: &Path,
@@ -970,21 +1018,48 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
+fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
+    let verify = |tcp: TcpStream| {
+        tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
+        let s = secure::handshake(tcp, key, true)?;
+        if s.remote != to.uid {
+            return Err(io::Error::other(
+                "a identidade desse aparelho mudou ou não confere: recusei por segurança",
+            ));
+        }
+        s.tcp().set_read_timeout(Some(Duration::from_secs(60)))?;
+        Ok(s)
+    };
+    let via_relay = |cfg: &relay::Config| {
+        relay::dial(cfg, to.uid)
+            .map_err(|e| io::Error::new(e.kind(), format!("não conectou pelo relay ({e})")))
+            .and_then(verify)
+    };
+    let addr = match &to.route {
+        Route::Lan(addr) => addr,
+        Route::Relay(cfg) => return via_relay(cfg),
+    };
+    TcpStream::connect_timeout(addr, Duration::from_secs(5))
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
+                ),
+            )
+        })
+        .and_then(verify)
+        .or_else(|lan| match &to.fallback {
+            Some(cfg) => {
+                via_relay(cfg).map_err(|r| io::Error::new(r.kind(), format!("{lan}; {r}")))
+            }
+            None => Err(lan),
+        })
+}
+
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
-    let tcp = TcpStream::connect_timeout(&to.addr, Duration::from_secs(5)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"),
-        )
-    })?;
-    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let mut s = secure::handshake(tcp, &me.key, true)?;
-    if s.remote != to.uid {
-        return Err(io::Error::other(
-            "a identidade desse aparelho mudou ou não confere: recusei por segurança",
-        ));
-    }
+    let mut s = connect(to, &me.key)?;
     let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
     writeln!(
         s,
@@ -1087,7 +1162,8 @@ mod tests {
         Peer {
             id: 1,
             name: "t".into(),
-            addr: ([127, 0, 0, 1], port).into(),
+            route: Route::Lan(([127, 0, 0, 1], port).into()),
+            fallback: None,
             seen: Instant::now(),
             born: Instant::now(),
             rtt: None,
@@ -1222,6 +1298,34 @@ mod tests {
         assert_eq!(route(&r, d, "bob", Some("x.pdf")), Path::new("/docs"));
         assert_eq!(route(&r, d, "bob", Some("x.rs")), d);
         assert_eq!(route(&r, d, "bob", None), d);
+    }
+
+    #[test]
+    fn lan_has_priority_over_relay() {
+        let peers = Peers::default();
+        let lan = Route::Lan(([127, 0, 0, 1], 1).into());
+        let t0 = Instant::now();
+        let put = |route, uid, at| upsert(&peers, 1, "a".into(), route, 0, uid, at);
+        let relay = || {
+            Route::Relay(Arc::new(relay::Config {
+                addr: String::new(),
+                room: String::new(),
+            }))
+        };
+        let is_lan = || matches!(peers.lock().unwrap()[&1].route, Route::Lan(_));
+
+        assert!(!put(relay(), 7, t0));
+        assert!(put(lan.clone(), 7, t0), "veio do relay e apareceu na LAN");
+        assert!(!put(lan, 7, t0));
+        let soon = t0 + Duration::from_secs(1);
+        put(relay(), 7, soon);
+        assert!(is_lan());
+        assert!(peers.lock().unwrap()[&1].fallback.is_some());
+        assert_eq!(peers.lock().unwrap()[&1].seen, t0);
+        put(relay(), 8, t0 + LAN_FRESH);
+        assert!(is_lan(), "outra identidade não assume");
+        put(relay(), 7, t0 + LAN_FRESH);
+        assert!(!is_lan());
     }
 
     #[test]
