@@ -273,15 +273,22 @@ An invalid flag stops pdrop; an invalid saved or environment value only disables
 
 ```
 src/
-├── main.rs    App state, key handling, settings, history, notifications, `pdrop send` CLI
-├── net.rs     Discovery (UDP sweep/broadcast), file/folder protocol with resume + hashing, receive rules
-├── secure.rs  Noise XX encrypted channel, device identity, pairing code
-├── ui.rs      The egui radar: pixel-art sprites, blips, panels, footer
-├── relay.rs   Relay client: presence in a room and tunnels
-├── relays.rs  Saved relays: which one is in use, switching between them
-├── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+├── main.rs      Startup: arguments, wiring, window
+├── cli.rs       `pdrop send`
+├── app/         Window state and incoming events (mod.rs), user actions (actions.rs)
+├── net/         Shared types (mod.rs), LAN discovery, sending, receiving rules
+├── relay/       Relay client: room presence and tunnels (client.rs), saved relays (saved.rs)
+├── ui/          egui interface: theme, sprites, widgets, keys, bars, footer, side panel, relay panel
+│   └── views/   The three views: sonar, grid, constellation
+├── config.rs    Settings files, device identity
+├── history.rs   Transfer history
+├── desktop.rs   Notifications, show in folder, hostname
+├── secure.rs    Noise XX encrypted channel, device identity, pairing code
+├── clip.rs      Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
+├── firewall.rs  Warns when the firewall blocks pdrop
+├── fmt.rs       Human-readable sizes
 └── bin/pdrop-relay.rs  Relay server: rooms + TCP tunnel
-assets/        Aseprite sources and exported PNGs (font, icons, sprites)
+assets/          Aseprite sources and exported PNGs (font, icons, sprites)
 ```
 
 Main dependencies: `eframe`/`egui` (window and rendering), `snow` (Noise encryption), `blake3` (file integrity), `socket2` (broadcast/reuse sockets) and `if-addrs` (subnet scan).

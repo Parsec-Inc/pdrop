@@ -1,4 +1,7 @@
-use crate::{net, relay};
+use crate::{
+    config::{owner_only, replace_file},
+    net, relay,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -162,7 +165,7 @@ pub fn load(dir: &Path) -> Saved {
     let path = dir.join(FILE);
     match read(&path) {
         Ok(Some(text)) => {
-            let _ = crate::owner_only(&path);
+            let _ = owner_only(&path);
             match Book::parse(&text) {
                 Ok(book) => saved.book = book,
                 Err(e) => saved.broken = Some(format!("{}: {e}", path.display())),
@@ -178,7 +181,7 @@ pub fn load(dir: &Path) -> Saved {
             };
             let (addr, secret) = (old(OLD_ADDR), old(OLD_SECRET));
             if secret.is_some() {
-                let _ = crate::owner_only(&dir.join(OLD_SECRET));
+                let _ = owner_only(&dir.join(OLD_SECRET));
             }
             match (&addr, &secret) {
                 (Some(a), Some(s)) if Profile::new("", a, s).is_ok() => {
@@ -194,7 +197,7 @@ pub fn load(dir: &Path) -> Saved {
 }
 
 fn store(dir: &Path, book: &Book) -> io::Result<()> {
-    crate::replace_file(&dir.join(FILE), &book.render(), true)?;
+    replace_file(&dir.join(FILE), &book.render(), true)?;
     for old in [OLD_ADDR, OLD_SECRET] {
         let _ = std::fs::remove_file(dir.join(old));
     }
