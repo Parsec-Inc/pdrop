@@ -65,12 +65,10 @@ fn angle(id: u64) -> f64 {
     (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) as f64 / (1u64 << 24) as f64 * TAU
 }
 
-// quanto cada peer ocupa em volta do ponto, em pontos de tela: ícone acima, nome abaixo
 const ABOVE: f32 = 46.0;
 const BELOW: f32 = 36.0;
 const ICON_HALF: f32 = 22.0;
 
-// meia largura do espaço de um peer. Reserva as marcas `*+` para ninguém pular ao ser marcado
 fn half_width(p: &egui::Painter, q: &Peer) -> f32 {
     let relay = if q.via_relay() { " · relay" } else { "" };
     text_half(p, format!("*+ {}{relay}", q.name))
@@ -87,11 +85,6 @@ fn footprint((x, y): (i32, i32), half: f32) -> egui::Rect {
     egui::Rect::from_min_max(at - egui::vec2(half, ABOVE), at + egui::vec2(half, BELOW))
 }
 
-// Posição de cada peer, em pixels do raster a partir do centro, e se ela cabe em `bounds` (a tela).
-// `wants` é (ângulo, distância preferida de 0 a 1, meia largura), em ordem de chegada: quem já
-// estava não sai do lugar quando entra alguém. Entre as vagas livres na tela, fica a mais perto da
-// preferida, mudando antes o ângulo que a distância. Sem vaga na tela, vai para o primeiro anel
-// mais afastado que tenha uma (aí é preciso navegar até lá). Nunca há sobreposição.
 fn spread(
     wants: &[(f64, f64, f32)],
     (rx, ry): (f64, f64),
@@ -109,18 +102,15 @@ fn spread(
                     -(ry * k * (ang + turn).sin()).round() as i32,
                 )
             };
-            // encostar na borda pode; ter área em comum não
             let free = |at| {
                 let me = footprint(at, half);
                 !taken.iter().any(|o| o.intersect(me).is_positive())
             };
-            // (afastamento da preferida, posição) da melhor vaga que aparece inteira na tela
             let mut best: Option<(f64, (i32, i32))> = None;
             for k in (5..=20).map(|k| k as f64 * 0.05) {
                 for i in 0..TURNS {
                     let turn = i as f64 / TURNS as f64 * TAU;
                     let cost = turn.min(TAU - turn) + 4.0 * (k - want).abs();
-                    // já há vaga mais perto: nem precisa testar colisão
                     if best.is_some_and(|(b, _)| cost >= b) {
                         continue;
                     }
@@ -133,12 +123,10 @@ fn spread(
             let spot = match best {
                 Some((_, p)) => (p, true),
                 None => {
-                    // 0, +1, -1, +2, -2…: a primeira vaga é a de ângulo mais perto do preferido
                     let turns = (0..TURNS).map(|i| {
                         let side = if i % 2 == 0 { -1.0 } else { 1.0 };
                         side * ((i + 1) / 2) as f64 / TURNS as f64 * TAU
                     });
-                    // sempre termina: longe o bastante, há espaço de sobra
                     let p = (5..)
                         .find_map(|k| {
                             turns
@@ -158,17 +146,15 @@ fn spread(
 
 #[derive(Clone, Copy)]
 struct Spot {
-    at: (i32, i32), // relativo ao centro
-    fits: bool,     // aparece inteiro sem navegar
+    at: (i32, i32),
+    fits: bool,
 }
 
-// última entrada de `spread` e o resultado
 type Cached = (
     (Vec<(f64, f64, f32)>, (f64, f64), egui::Rect, f32),
     Vec<((i32, i32), bool)>,
 );
 
-// `spread` para os peers da tela, de tamanho `w`×`h` no raster
 fn layout(
     p: &egui::Painter,
     peers: &[Peer],
@@ -184,7 +170,6 @@ fn layout(
         .collect();
     let half = egui::vec2((w / 2) as f32 * S, (h / 2) as f32 * S);
     let bounds = egui::Rect::from_min_max((-half).to_pos2(), half.to_pos2());
-    // recalculado só quando a entrada muda, não a cada quadro
     let key = (wants, radii, bounds, text_half(p, "você".into()));
     let id = egui::Id::unique("spots");
     let cached = p.ctx().data(|d| d.get_temp::<Cached>(id));
@@ -203,8 +188,6 @@ fn layout(
         .collect()
 }
 
-// Um passo de `from` até `to`, andando a fração `t` do que falta. Vai em coordenadas polares:
-// quem muda de lado contorna o centro em vez de passar por cima de "você".
 fn glide(from: egui::Vec2, to: egui::Vec2, t: f32) -> egui::Vec2 {
     if (to - from).length() < 0.5 {
         return to;
@@ -213,8 +196,6 @@ fn glide(from: egui::Vec2, to: egui::Vec2, t: f32) -> egui::Vec2 {
     egui::Vec2::angled(from.angle() + turn * t) * egui::lerp(from.length()..=to.length(), t)
 }
 
-// Onde cada coisa está neste quadro: o centro do mapa e cada peer, no raster.
-// Quando a seleção muda (ou o lugar dela), a câmera vai até ela se estiver fora da tela, ou volta para o centro; depois disso dá para arrastar.
 fn camera(
     app: &mut App,
     resp: &egui::Response,
@@ -231,21 +212,17 @@ fn camera(
         };
     }
     if resp.dragged() {
-        // não deixa o mapa se perder: só até o peer mais distante
         let far =
             |f: fn(&Spot) -> i32| spots.values().map(|s| f(s).abs()).max().unwrap_or(0) as f32;
         let (mx, my) = (far(|s| s.at.0), far(|s| s.at.1));
         app.pan -= resp.drag_delta() / S;
         app.pan = app.pan.clamp(egui::vec2(-mx, -my), egui::vec2(mx, my));
     }
-    // desaceleração exponencial: ~95% do caminho em 200 ms, e aceita mudar de destino no meio.
-    // Com `--calm`, tudo vai direto para o lugar
     let t = if app.calm {
         1.0
     } else {
         1.0 - (-15.0 * resp.ctx.input(|i| i.stable_dt).min(0.1)).exp()
     };
-    // arrastando, o mapa acompanha o mouse sem atraso
     app.pan_now = if resp.dragged() || (app.pan - app.pan_now).length() < 0.5 {
         app.pan
     } else {
@@ -260,7 +237,6 @@ fn camera(
         .iter()
         .map(|(&id, s)| {
             let to = egui::vec2(s.at.0 as f32, s.at.1 as f32);
-            // quem acabou de chegar já nasce no lugar
             let now = app.drawn.entry(id).or_insert(to);
             *now = glide(*now, to, t);
             let (x, y) = (now.x.round() as i32, now.y.round() as i32);
@@ -270,7 +246,6 @@ fn camera(
     (center, placed)
 }
 
-// avisa que há gente além da borda
 fn offscreen(p: &egui::Painter, rect: egui::Rect, at: impl Iterator<Item = Pos2>) {
     let n = at.filter(|a| !rect.contains(*a)).count();
     if n > 0 {
@@ -367,15 +342,12 @@ mod tests {
 
     #[test]
     fn peers_never_overlap() {
-        // pior caso: todo mundo querendo o mesmo ponto
         let wants = vec![(1.0, 0.5, 60.0); 40];
         let rect = |x: f32, y: f32| egui::Rect::from_min_max(egui::pos2(-x, -y), egui::pos2(x, y));
         let wide = check(&wants[..4], rect(640.0, 480.0));
         assert!(wide.iter().all(|s| s.1), "cabia na tela");
-        // tela pequena: quem não cabe vai para fora dela, ainda sem sobrepor
         let tight = check(&wants, rect(200.0, 140.0));
         assert!(tight.iter().any(|s| !s.1));
-        // quem chega depois não move quem já estava
         assert_eq!(check(&wants[..5], rect(200.0, 140.0)), tight[..5]);
     }
 

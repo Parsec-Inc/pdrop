@@ -2,7 +2,6 @@ use super::{busy_with, gone, pop, tagged};
 use crate::{App, net::Peer, ui::theme::*};
 use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense, pos2, vec2};
 
-// seleção: grade de retratos, no estilo das telas de escolha de personagem
 pub(in crate::ui) fn grid(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     const TW: f32 = 56.0;
     const TH: f32 = 64.0;

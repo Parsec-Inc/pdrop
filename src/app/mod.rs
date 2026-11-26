@@ -19,7 +19,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-// (visão, peer selecionado, posição dele, tamanho do mapa)
 pub(crate) type CamKey = (u8, u64, (i32, i32), (usize, usize));
 
 pub struct App {
@@ -60,10 +59,8 @@ pub struct App {
     pub view: u8,
     pub cols: usize,
     pub search: Option<String>,
-    // câmera do radar e da constelação: deslocamento, e a seleção para a qual ele foi calculado
     pub pan: eframe::egui::Vec2,
     pub(crate) cam_key: Option<CamKey>,
-    // o que está na tela agora, a caminho dos destinos acima
     pub(crate) pan_now: eframe::egui::Vec2,
     pub(crate) drawn: std::collections::HashMap<u64, eframe::egui::Vec2>,
     pub more: bool,
@@ -265,8 +262,6 @@ impl eframe::App for App {
     }
 }
 
-// listas mostradas da mais nova para a mais antiga: ao entrar uma no topo, o item `i`
-// selecionado passa a ser o `i + 1`
 fn keep(i: usize, len: usize) -> usize {
     (i + 1).min(len.saturating_sub(1))
 }

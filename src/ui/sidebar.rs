@@ -124,7 +124,6 @@ fn eta(s: u64) -> String {
     }
 }
 
-// texto de uma mensagem: um trecho na lista, inteiro (e selecionável) quando aberto
 fn message(ui: &mut egui::Ui, text: &str, open: bool) {
     let max = if open { usize::MAX } else { 80 };
     let mut s: String = text.chars().take(max).collect();
@@ -195,7 +194,6 @@ pub(super) fn history(ui: &mut egui::Ui, app: &mut App) {
                         Stroke::new(S, c(acc)),
                         egui::StrokeKind::Outside,
                     );
-                    // só ao mudar a seleção, para dar para rolar uma mensagem longa
                     let seen = ui.make_persistent_id("histsel");
                     if ui.data_mut(|d| d.get_temp::<usize>(seen)) != Some(i) {
                         ui.data_mut(|d| d.insert_temp(seen, i));

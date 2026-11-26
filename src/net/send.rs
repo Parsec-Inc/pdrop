@@ -65,7 +65,7 @@ pub fn send(to: Peer, me: Who, inputs: Vec<String>, tx: Sender<Msg>) {
                 };
                 if kind == 't' {
                     t.label = "mensagem".into();
-                    t.src = t.src.trim().to_string(); // o mesmo texto que vai pela rede
+                    t.src = t.src.trim().to_string();
                 }
                 (t.size, t.kind) = (size, kind);
                 tx.send(Msg::Start(t.clone())).ok();
@@ -273,7 +273,6 @@ fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> 
     Ok(s)
 }
 
-/// só vale comprimir o que ainda não está comprimido
 fn compressible(rel: &str) -> bool {
     const SKIP: &[&str] = &[
         "jpg", "jpeg", "png", "gif", "webp", "heic", "avif", "mp4", "mkv", "mov", "webm", "avi",

@@ -9,7 +9,6 @@ use eframe::egui::{
 };
 use std::f64::consts::TAU;
 
-// constelação: céu noturno, cada peer é uma estrela ligada a você
 pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let (acc, t) = (app.acc(), app.anim);
     let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());

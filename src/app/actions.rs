@@ -158,7 +158,6 @@ impl App {
         self.flash(format!("reenviando para {}", p.name));
     }
 
-    // Responde só o pedido `id`; se já foi resolvido (ex.: pela notificação), ignora.
     pub(crate) fn answer(&mut self, id: u64, yes: bool) {
         if let Some(i) = self.pending.iter().position(|(t, _)| t.id == id) {
             if let Some((_, r)) = self.pending.remove(i) {
@@ -170,7 +169,6 @@ impl App {
         }
     }
 
-    // seleciona o `step`-ésimo resultado da busca a partir do atual (0: mantém, se ainda casar)
     pub(crate) fn search_pick(&mut self, peers: &[Peer], step: isize) {
         let hits = self.search_hits(peers);
         if !hits.is_empty() {
