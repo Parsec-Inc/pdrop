@@ -1,3 +1,25 @@
+## v2.0.0 (2026-11-26)
+
+### BREAKING CHANGE
+
+- HELLO requires a memebership key, the relay and its clients must be updated
+
+### Feat
+
+- **relay**: configure and save several relays from the window
+- relay interface support
+- **relay.rs**: added config option on relay and room on cli
+- dial and accepts
+- **relay.rs**: added relay room
+- **net.rs**: added p2p route
+- basic relay features
+
+### Fix
+
+- **relay**: address second review round
+- **relay.rs**: fixed windows token generation
+- solved ghost member
+
 ## v1.2.4 (2026-11-23)
 
 ## v1.2.3 (2026-11-23)
