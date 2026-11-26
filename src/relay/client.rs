@@ -368,7 +368,7 @@ fn drop_relay_peers(peers: &Peers, uid: Option<u128>) {
 }
 
 #[cfg(test)]
-#[path = "bin/pdrop-relay.rs"]
+#[path = "../bin/pdrop-relay.rs"]
 #[allow(dead_code)]
 mod server;
 

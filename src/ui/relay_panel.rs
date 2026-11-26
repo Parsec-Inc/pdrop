@@ -1,5 +1,12 @@
-use super::*;
-use crate::relays::{Env, NAME_MAX, Profile};
+use super::{
+    theme::*,
+    widgets::{button, panel, pixel_frame, well},
+};
+use crate::{
+    App,
+    relay::saved::{Env, NAME_MAX, Profile},
+};
+use eframe::egui::{self, Align, FontId, Key, Layout, Sense, vec2};
 
 #[derive(Default)]
 pub struct RelayPanel {

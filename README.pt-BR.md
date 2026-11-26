@@ -273,15 +273,22 @@ Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido s
 
 ```
 src/
-├── main.rs    Estado do app, teclas, configurações, histórico, notificações, CLI `pdrop send`
-├── net.rs     Descoberta (varredura/broadcast UDP), protocolo de arquivos/pastas com retomada e hash, regras de recebimento
-├── secure.rs  Canal criptografado Noise XX, identidade do aparelho, código de pareamento
-├── ui.rs      O radar em egui: sprites em pixel art, pontos, painéis, rodapé
-├── relay.rs   Cliente do relay: presença na sala e túneis
-├── relays.rs  Relays salvos: qual está em uso e a troca entre eles
-├── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+├── main.rs      Inicialização: argumentos, montagem das peças, janela
+├── cli.rs       `pdrop send`
+├── app/         Estado da janela e eventos recebidos (mod.rs), ações do usuário (actions.rs)
+├── net/         Tipos comuns (mod.rs), descoberta na rede local, envio, regras de recebimento
+├── relay/       Cliente do relay: presença na sala e túneis (client.rs), relays salvos (saved.rs)
+├── ui/          Interface em egui: tema, sprites, widgets, teclas, barras, rodapé, painel lateral, painel de relays
+│   └── views/   As três visões: sonar, seleção, constelação
+├── config.rs    Arquivos de configuração, identidade do aparelho
+├── history.rs   Histórico de transferências
+├── desktop.rs   Notificações, mostrar na pasta, nome da máquina
+├── secure.rs    Canal cifrado Noise XX, identidade do aparelho, código de pareamento
+├── clip.rs      Clipboard pelas ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
+├── firewall.rs  Avisa quando o firewall bloqueia o pdrop
+├── fmt.rs       Tamanhos em formato legível
 └── bin/pdrop-relay.rs  Servidor relay: salas + túnel TCP
-assets/        Fontes em Aseprite e PNGs exportados (fonte, ícones, sprites)
+assets/          Fontes em Aseprite e PNGs exportados (fonte, ícones, sprites)
 ```
 
 Principais dependências: `eframe`/`egui` (janela e renderização), `snow` (criptografia Noise), `blake3` (integridade dos arquivos), `socket2` (sockets de broadcast/reuso) e `if-addrs` (varredura de sub-redes).
