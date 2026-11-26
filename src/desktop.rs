@@ -59,9 +59,14 @@ pub fn notify(body: String, ask: Option<(u64, Sender<Msg>)>) -> Arc<AtomicBool> 
         #[cfg(not(any(target_os = "macos", windows)))]
         let (mut c, parse) = {
             let mut c = std::process::Command::new("notify-send");
-            c.args(["-a", "pdrop", "-u", "critical"]);
+            // nada de `-u critical`: pela especificação, notificação crítica nunca expira.
+            // `transient` também a tira da central de notificações quando some.
+            c.args(["-a", "pdrop", "-h", "int:transient:1"]);
             if asking {
-                c.args(["-w", "-A", "y=Aceitar", "-A", "n=Recusar"]);
+                c.args(["-t", "120000", "-w"]);
+                c.args(["-A", "y=Aceitar", "-A", "n=Recusar"]);
+            } else {
+                c.args(["-t", "6000"]);
             }
             c.args(["pdrop", &body.replace('&', "&amp;").replace('<', "&lt;")]);
             (

@@ -1,4 +1,4 @@
-use super::{Raster, angle, gone, hash, labeled, pop, unit};
+use super::{Raster, angle, gone, hash, labeled, layout, pop, unit};
 use crate::{
     App,
     net::{Peer, State},
@@ -25,13 +25,8 @@ pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         (w as f64 / 2.0 - 30.0).max(20.0),
         (h as f64 / 2.0 - 24.0).max(20.0),
     );
-    let place = |q: &Peer| {
-        let (a, k) = (angle(q.id), 0.45 + 0.5 * unit(q.id));
-        (
-            cx + (rx * k * a.cos()).round() as i32,
-            cy - (ry * k * a.sin()).round() as i32,
-        )
-    };
+    let spots = layout(&p, peers, (cx, cy), (rx, ry), |q| 0.45 + 0.5 * unit(q.id));
+    let place = |q: &Peer| spots[&q.id];
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
     if resp.clicked()
         && let Some(m) = resp.interact_pointer_pos()
