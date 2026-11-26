@@ -59,13 +59,17 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::Send => app.send_input(peers),
         Act::Clip => app.clip_once(peers),
         Act::Bridge => app.toggle_bridge(peers),
-        Act::PickColor => (app.pick, app.pick_icon) = (Some(app.color), None),
-        Act::PickIcon => (app.pick_icon, app.pick) = (Some(app.icon), None),
+        Act::PickColor => (app.pick, app.pick_icon, app.search) = (Some(app.color), None, None),
+        Act::PickIcon => (app.pick_icon, app.pick, app.search) = (Some(app.icon), None, None),
         Act::SetColor(i) => app.set_color(i),
         Act::SetIcon(i) => app.set_icon(i),
-        Act::OpenRename => (app.rename, app.focus) = (Some(app.me.clone()), true),
+        Act::OpenRename => (app.rename, app.search, app.focus) = (Some(app.me.clone()), None, true),
         Act::SetName => app.set_name(),
-        Act::OpenSearch => (app.search, app.focus) = (Some(String::new()), true),
+        Act::OpenSearch if app.input.is_none() => {
+            (app.rename, app.pick, app.pick_icon) = (None, None, None);
+            (app.search, app.focus) = (Some(String::new()), true);
+        }
+        Act::OpenSearch => {}
         Act::CutBridges => {
             app.grants.lock().unwrap().clear();
             app.flash("pontes recebidas cortadas");

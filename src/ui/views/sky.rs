@@ -24,7 +24,7 @@ pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         (h as f64 / 2.0 - 24.0).max(20.0),
     );
     let spots = layout(&p, peers, (w, h), (rx, ry), |q| 0.45 + 0.5 * unit(q.id));
-    let ((cx, cy), placed) = camera(app, &resp, &spots, (w, h));
+    let ((cx, cy), placed, hidden) = camera(app, &resp, &spots, (w, h));
     let place = |q: &Peer| placed[&q.id];
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
     if resp.clicked()
@@ -128,7 +128,7 @@ pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             c(lab),
         );
     }
-    offscreen(&p, rect, peers.iter().map(|q| scr(place(q))));
+    offscreen(&p, rect, hidden);
     let ctr = scr((cx, cy));
     p.text(
         snap(ctr + vec2(0.0, 5.0 * S)),

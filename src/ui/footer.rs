@@ -152,9 +152,7 @@ pub(super) fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             let step = ui.input(|i| {
                 i.key_pressed(Key::ArrowDown) as isize - i.key_pressed(Key::ArrowUp) as isize
             });
-            if r.changed() || step != 0 {
-                app.search_pick(peers, step);
-            }
+            app.search_pick(peers, step);
             let hits = app.search_hits(peers);
             ui.label(match hits.iter().position(|&id| Some(id) == app.sel) {
                 Some(i) => txt(format!("{} de {} · ↑↓ enter", i + 1, hits.len()), MUTED),
@@ -340,7 +338,8 @@ pub(super) fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         }
         let relays_open = app.relay_ui.is_some().then_some(acc);
         let searching = app.search.is_some().then_some(acc);
-        if button(ui, sp, None, "Buscar", "F", has, searching).clicked() {
+        let can_search = has && app.input.is_none();
+        if button(ui, sp, None, "Buscar", "F", can_search, searching).clicked() {
             act = Act::OpenSearch;
         }
         if button(ui, sp, None, "Relay", "W", true, relays_open).clicked() {

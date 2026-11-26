@@ -28,7 +28,7 @@ pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             0.5
         }
     });
-    let ((cx, cy), placed) = camera(app, &resp, &spots, (w, h));
+    let ((cx, cy), placed, hidden) = camera(app, &resp, &spots, (w, h));
     let place = |q: &Peer| placed[&q.id];
     let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let busy: Vec<_> = app
@@ -206,7 +206,7 @@ pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         );
     }
 
-    offscreen(&p, rect, peers.iter().map(|q| scr(place(q))));
+    offscreen(&p, rect, hidden);
 
     let ctr = scr((cx, cy));
     p.text(

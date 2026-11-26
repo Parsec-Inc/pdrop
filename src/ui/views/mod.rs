@@ -80,6 +80,21 @@ fn text_half(p: &egui::Painter, s: String) -> f32 {
     (w / 2.0).max(ICON_HALF) + 2.0
 }
 
+fn view_bounds((w, h): (usize, usize)) -> egui::Rect {
+    let half = egui::vec2((w / 2) as f32 * S, (h / 2) as f32 * S);
+    egui::Rect::from_min_max((-half).to_pos2(), half.to_pos2())
+}
+
+fn clipped<'a>(spots: impl Iterator<Item = ((i32, i32), f32)> + 'a, size: (usize, usize)) -> usize {
+    let (mid, bounds) = (
+        ((size.0 / 2) as i32, (size.1 / 2) as i32),
+        view_bounds(size),
+    );
+    spots
+        .filter(|&((x, y), half)| !bounds.contains_rect(footprint((x - mid.0, y - mid.1), half)))
+        .count()
+}
+
 fn footprint((x, y): (i32, i32), half: f32) -> egui::Rect {
     let at = egui::pos2(x as f32 * S, y as f32 * S);
     egui::Rect::from_min_max(at - egui::vec2(half, ABOVE), at + egui::vec2(half, BELOW))
@@ -148,6 +163,7 @@ fn spread(
 struct Spot {
     at: (i32, i32),
     fits: bool,
+    half: f32,
 }
 
 type Cached = (
@@ -168,8 +184,8 @@ fn layout(
         .iter()
         .map(|q| (angle(q.id), dist(q), half_width(p, q)))
         .collect();
-    let half = egui::vec2((w / 2) as f32 * S, (h / 2) as f32 * S);
-    let bounds = egui::Rect::from_min_max((-half).to_pos2(), half.to_pos2());
+    let bounds = view_bounds((w, h));
+    let halves: Vec<f32> = wants.iter().map(|w| w.2).collect();
     let key = (wants, radii, bounds, text_half(p, "você".into()));
     let id = egui::Id::unique("spots");
     let cached = p.ctx().data(|d| d.get_temp::<Cached>(id));
@@ -184,7 +200,8 @@ fn layout(
     order
         .iter()
         .zip(at)
-        .map(|(q, (at, fits))| (q.id, Spot { at, fits }))
+        .zip(halves)
+        .map(|((q, (at, fits)), half)| (q.id, Spot { at, fits, half }))
         .collect()
 }
 
@@ -196,12 +213,14 @@ fn glide(from: egui::Vec2, to: egui::Vec2, t: f32) -> egui::Vec2 {
     egui::Vec2::angled(from.angle() + turn * t) * egui::lerp(from.length()..=to.length(), t)
 }
 
+type Scene = ((i32, i32), HashMap<u64, (i32, i32)>, usize);
+
 fn camera(
     app: &mut App,
     resp: &egui::Response,
     spots: &HashMap<u64, Spot>,
     (w, h): (usize, usize),
-) -> ((i32, i32), HashMap<u64, (i32, i32)>) {
+) -> Scene {
     let sel = app.sel.and_then(|id| Some((id, *spots.get(&id)?)));
     let key = sel.map(|(id, s)| (app.view, id, s.at, (w, h)));
     if app.cam_key != key {
@@ -242,12 +261,12 @@ fn camera(
             let (x, y) = (now.x.round() as i32, now.y.round() as i32);
             (id, (center.0 + x, center.1 + y))
         })
-        .collect();
-    (center, placed)
+        .collect::<HashMap<_, _>>();
+    let hidden = clipped(placed.iter().map(|(id, &at)| (at, spots[id].half)), (w, h));
+    (center, placed, hidden)
 }
 
-fn offscreen(p: &egui::Painter, rect: egui::Rect, at: impl Iterator<Item = Pos2>) {
-    let n = at.filter(|a| !rect.contains(*a)).count();
+fn offscreen(p: &egui::Painter, rect: egui::Rect, n: usize) {
     if n > 0 {
         p.text(
             snap(rect.left_top() + egui::vec2(4.0 * S, 2.0 * S)),
@@ -349,6 +368,12 @@ mod tests {
         let tight = check(&wants, rect(200.0, 140.0));
         assert!(tight.iter().any(|s| !s.1));
         assert_eq!(check(&wants[..5], rect(200.0, 140.0)), tight[..5]);
+    }
+
+    #[test]
+    fn cut_labels_count_as_off_screen() {
+        let spots = [((100, 100), 60.0), ((190, 100), 60.0), ((400, 100), 60.0)];
+        assert_eq!(clipped(spots.into_iter(), (200, 200)), 2);
     }
 
     #[test]
