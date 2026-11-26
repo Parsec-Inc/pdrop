@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
-    thread::{self, sleep},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -34,8 +34,8 @@ pub fn config(addr: Option<&str>, secret: Option<&str>) -> Result<Option<Config>
     let (addr, secret) = match (addr.map(str::trim), secret.map(str::trim)) {
         (None, None) => return Ok(None),
         (Some(a), Some(s)) => (a, s),
-        (Some(_), None) => return Err("relay sem o segredo da sala".into()),
-        (None, Some(_)) => return Err("segredo da sala sem o endereço do relay".into()),
+        (Some(_), None) => return Err("relay sem a senha".into()),
+        (None, Some(_)) => return Err("senha sem o endereço do relay".into()),
     };
     let valid = addr
         .rsplit_once(':')
@@ -46,7 +46,7 @@ pub fn config(addr: Option<&str>, secret: Option<&str>) -> Result<Option<Config>
     }
     if secret.chars().count() < MIN_SECRET {
         return Err(format!(
-            "segredo da sala curto demais (mínimo de {MIN_SECRET} caracteres); gere um com: openssl rand -hex 16"
+            "senha curta demais (mínimo de {MIN_SECRET} caracteres)"
         ));
     }
     Ok(Some(Config {
@@ -85,27 +85,72 @@ pub fn room_of(secret: &str) -> String {
     blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
 }
 
-pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Status {
+/// liga e desliga a conexão de controle em andamento
+pub struct Handle {
+    pub status: Status,
+    stop: Arc<Mutex<Stop>>,
+    thread: thread::Thread,
+    peers: Peers,
+}
+
+#[derive(Default)]
+struct Stop {
+    stopped: bool,
+    sock: Option<TcpStream>,
+}
+
+impl Handle {
+    /// quando volta, esta conexão não mexe mais no radar, mesmo que a thread ainda esteja saindo.
+    /// Transferências que já estão num túnel continuam.
+    pub fn stop(self) {
+        let mut g = self.stop.lock().unwrap();
+        g.stopped = true;
+        if let Some(s) = g.sock.take() {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        drop_relay_peers(&self.peers, None);
+        drop(g);
+        self.thread.unpark();
+    }
+}
+
+pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Handle {
     let cfg = Arc::new(cfg);
     let status = Status::new(Mutex::new(Link::Connecting));
-    let link = status.clone();
-    thread::spawn(move || {
+    let stop = Arc::new(Mutex::new(Stop::default()));
+    let (link, stop2, peers2) = (status.clone(), stop.clone(), peers.clone());
+    let thread = thread::spawn(move || {
+        let (stop, peers) = (stop2, peers2);
         let mut wait = Duration::from_secs(1);
         let mut last_error = String::new();
         loop {
             let start = Instant::now();
-            let error = match connect(&cfg, &me) {
+            let attempt = connect(&cfg, &me);
+            let error = match attempt {
                 Ok(s) => {
+                    {
+                        let mut g = stop.lock().unwrap();
+                        if g.stopped {
+                            return;
+                        }
+                        g.sock = s.get_ref().try_clone().ok();
+                    }
                     eprintln!("relay: conectado a {}", cfg.addr);
                     last_error.clear();
                     *link.lock().unwrap() = Link::Up;
-                    let e = session(s, &cfg, &me, &peers, &incoming);
-                    drop_relay_peers(&peers, None);
-                    e
+                    session(s, &cfg, &me, &peers, &incoming, &stop)
                 }
                 Err(e) => e,
             }
             .to_string();
+            {
+                let mut g = stop.lock().unwrap();
+                if g.stopped {
+                    return;
+                }
+                g.sock = None;
+                drop_relay_peers(&peers, None);
+            }
             *link.lock().unwrap() = Link::Down(error.clone());
             if error != last_error {
                 eprintln!("relay: {error}; tentando de novo");
@@ -115,11 +160,24 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Status {
             if start.elapsed() > MAX_BACKOFF {
                 wait = Duration::from_secs(1);
             }
-            sleep(wait);
+            let until = Instant::now() + wait;
+            while Instant::now() < until {
+                thread::park_timeout(until.saturating_duration_since(Instant::now()));
+                if stop.lock().unwrap().stopped {
+                    return;
+                }
+            }
             wait = (wait * 2).min(MAX_BACKOFF);
         }
-    });
-    status
+    })
+    .thread()
+    .clone();
+    Handle {
+        status,
+        stop,
+        thread,
+        peers,
+    }
 }
 
 fn dial_tcp(addr: &str) -> io::Result<TcpStream> {
@@ -221,6 +279,7 @@ fn session(
     me: &Me,
     peers: &Peers,
     incoming: &Incoming,
+    halt: &Mutex<Stop>,
 ) -> io::Error {
     let mut w = match r.get_ref().try_clone() {
         Ok(w) => w,
@@ -239,10 +298,17 @@ fn session(
     });
     let error = loop {
         match read_line(&mut r) {
-            Ok(l) => match l.strip_prefix("INCOMING ") {
-                Some(token) => answer(token, cfg, me.uid, incoming),
-                None => handle(&l, cfg, me, peers),
-            },
+            Ok(l) => {
+                // com a trava na mão, um `Handle::stop` não passa no meio de uma atualização
+                let g = halt.lock().unwrap();
+                if g.stopped {
+                    break io::Error::other("relay desligado");
+                }
+                match l.strip_prefix("INCOMING ") {
+                    Some(token) => answer(token, cfg, me.uid, incoming),
+                    None => handle(&l, cfg, me, peers),
+                }
+            }
             Err(e) => break e,
         }
     };
@@ -340,7 +406,7 @@ mod tests {
         net::{Grants, Msg, Who},
         secure,
     };
-    use std::{net::TcpListener, sync::mpsc::channel};
+    use std::{net::TcpListener, sync::mpsc::channel, thread::sleep};
 
     fn start_server() -> String {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -412,6 +478,7 @@ mod tests {
                 Peers::default(),
                 Arc::new(|_| {}),
             )
+            .status
         };
         let up = start(&start_server());
         until("conectado", || matches!(*up.lock().unwrap(), Link::Up));
@@ -425,6 +492,38 @@ mod tests {
         until("sem conexão", || {
             matches!(*down.lock().unwrap(), Link::Down(_))
         });
+    }
+
+    #[test]
+    fn a_stopped_connection_leaves_the_room_and_stays_quiet() {
+        let addr = start_server();
+        let join = |id| {
+            let peers = Peers::default();
+            let handle = watch(
+                config(&addr),
+                me(id, net::VIS_ALL),
+                peers.clone(),
+                Arc::new(|_| {}),
+            );
+            (peers, handle)
+        };
+        let (a, ha) = join(1);
+        let (b, _hb) = join(2);
+        until("a e b se veem", || {
+            a.lock().unwrap().contains_key(&2) && b.lock().unwrap().contains_key(&1)
+        });
+        // quem também está na LAN continua no radar, só sem o caminho pelo relay
+        let lan = Route::Lan(([127, 0, 0, 1], 1).into());
+        net::upsert(&a, 9, "perto".into(), lan, 0, 0xa, Instant::now());
+        let status = ha.status.clone();
+        ha.stop();
+        assert!(a.lock().unwrap().keys().eq([&9]));
+        until("b vê a saída", || !b.lock().unwrap().contains_key(&1));
+        // passa de alguns beacons e do primeiro intervalo de reconexão
+        sleep(EVERY * 2);
+        assert!(a.lock().unwrap().keys().eq([&9]));
+        assert!(!b.lock().unwrap().contains_key(&1), "voltou à sala");
+        assert!(matches!(*status.lock().unwrap(), Link::Up));
     }
 
     #[test]

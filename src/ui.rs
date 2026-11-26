@@ -1,3 +1,6 @@
+mod relays;
+pub use relays::RelayPanel;
+
 use crate::{
     App,
     net::{Peer, State},
@@ -279,6 +282,7 @@ fn button(
     hot: Option<Rgb>,
 ) -> egui::Response {
     let font = FontId::proportional(TXT);
+    let keyed = !key.is_empty();
     let lab = ui
         .painter()
         .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE);
@@ -289,9 +293,11 @@ fn button(
     let w = pad
         + icon.map_or(0.0, |_| 8.0 * S + 4.0 * S)
         + lab.size().x
-        + 4.0 * S
-        + k.size().x
-        + 8.0 * S
+        + if keyed {
+            4.0 * S + k.size().x + 8.0 * S
+        } else {
+            0.0
+        }
         + pad;
     let (r, resp) = ui.allocate_exact_size(
         vec2((w / S).ceil() * S, 20.0 * S),
@@ -329,6 +335,9 @@ fn button(
     let ty = cy - lab.size().y / 2.0;
     p.galley(snap(pos2(x, ty)), lab.clone(), ink);
     x += lab.size().x + 4.0 * S;
+    if !keyed {
+        return resp;
+    }
     let kr = Rect::from_min_size(
         snap(pos2(x, cy - 7.0 * S)),
         vec2(k.size().x + 5.0 * S, 14.0 * S),
@@ -382,6 +391,7 @@ enum Act {
     HistReveal,
     HistResend,
     Cancel,
+    Relays,
     Browse(isize),
     Quit,
 }
@@ -426,6 +436,12 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::HistStep(d) => app.hist_step(d),
         Act::HistReveal => app.hist_reveal(),
         Act::HistResend => app.hist_resend(peers),
+        // a tela dos relays fecha uma coisa por vez: o formulário, depois ela mesma
+        Act::Cancel if app.relay_ui.is_some() => {
+            if app.relay_ui.as_mut().is_some_and(|p| !p.back()) {
+                app.relay_ui = None;
+            }
+        }
         Act::Cancel
             if app.input.is_none()
                 && app.rename.is_none()
@@ -450,6 +466,12 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
             let step = |v: u8, n: usize| (v as isize + d).rem_euclid(n as isize) as u8;
             app.pick = app.pick.map(|v| step(v, COLORS.len()));
             app.pick_icon = app.pick_icon.map(|v| step(v, ICONS.len()));
+        }
+        Act::Relays => {
+            app.relay_ui = match app.relay_ui {
+                Some(_) => None,
+                None => Some(RelayPanel::default()),
+            }
         }
         Act::Quit => {}
     }
@@ -476,6 +498,13 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
         }
         if let Some((t, _)) = app.pending.front().filter(|_| k(Key::Y) || k(Key::N)) {
             return Act::Answer(t.id, k(Key::Y));
+        }
+        if k(Key::W) {
+            return Act::Relays;
+        }
+        // com a tela dos relays aberta, os atalhos do radar ficam parados
+        if app.relay_ui.is_some() {
+            return Act::None;
         }
         if let Some(v) = app.pick.or(app.pick_icon) {
             return match () {
@@ -561,7 +590,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     egui::Panel::top("top")
         .frame(pixel_frame(6.0 * S))
         .show_separator_line(false)
-        .show(ui, |ui| header(ui, app, peers));
+        .show(ui, |ui| {
+            if header(ui, app, peers) {
+                apply(app, Act::Relays, peers);
+            }
+        });
     firewall_bar(ui, app);
     relay_bar(ui, app);
     egui::Panel::bottom("bottom")
@@ -589,13 +622,16 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| match app.view {
+            _ if app.relay_ui.is_some() => relays::draw(ui, app),
             1 => grid(ui, app, peers),
             2 => sky(ui, app, peers),
             _ => radar(ui, app, peers),
         });
 }
 
-fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) {
+/// devolve true quando clicam no estado do relay
+fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) -> bool {
+    let mut open_relays = false;
     let acc = app.acc();
     let n = peers.len();
     // com alguém vindo pelo relay, "por perto" deixa de ser verdade
@@ -623,14 +659,15 @@ fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) {
                 n => format!("{n} {near}"),
             };
             ui.label(txt(r, MUTED));
-            if let Some(status) = &app.relay {
-                let (text, col) = match &*status.lock().unwrap() {
+            if let Some(link) = app.relay.link() {
+                let (text, col) = match link {
                     Link::Connecting => ("relay conectando…", MUTED),
                     Link::Up => ("relay conectado", MUTED),
                     Link::Down(_) => ("relay sem conexão", WARN),
                     Link::Off(_) => ("relay desligado", WARN),
                 };
-                ui.label(txt(text, col));
+                let label = egui::Label::new(txt(text, col)).sense(Sense::click());
+                open_relays = ui.add(label).on_hover_text("configurar relays").clicked();
             }
             if let Some((_, name, _)) = &app.bridge {
                 ui.label(txt(format!("ponte para {name}"), acc));
@@ -641,6 +678,7 @@ fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) {
             }
         });
     });
+    open_relays
 }
 
 fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
@@ -666,10 +704,10 @@ fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
 
 /// o motivo da falha fica à vista: quem abre pelo menu não vê o terminal
 fn relay_bar(ui: &mut egui::Ui, app: &App) {
-    let Some(status) = &app.relay else {
+    let Some(link) = app.relay.link() else {
         return;
     };
-    let text = match &*status.lock().unwrap() {
+    let text = match link {
         Link::Down(why) => format!("relay: {why}. Tentando de novo; a rede local segue normal."),
         Link::Off(why) => format!("relay desligado: {why}"),
         Link::Connecting | Link::Up => return,
@@ -1472,6 +1510,10 @@ fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             .clicked()
         {
             act = Act::CutBridges;
+        }
+        let relays_open = app.relay_ui.is_some().then_some(acc);
+        if button(ui, sp, None, "Relay", "W", true, relays_open).clicked() {
+            act = Act::Relays;
         }
         if button(ui, sp, None, "Opções", "O", true, app.more.then_some(acc)).clicked() {
             act = Act::More;

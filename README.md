@@ -168,6 +168,7 @@ With no valid arguments, it prints the usage line. Everything else is done insid
 | `p` | Open the received-clipboard history (`↑/↓`, `enter` to restore) |
 | `g` | Open or close the history (`↑/↓` browse, `enter` show in folder, `e` resend) |
 | `y` / `n` | Accept / refuse an incoming transfer or bridge request |
+| `w` | Open or close the relay screen (also the *Relay* button) |
 | `esc` | Cancel the open prompt or picker |
 | `q`, `ctrl+c` | Quit |
 
@@ -218,7 +219,7 @@ On the LAN everything is peer-to-peer, with no server. The optional [relay](#rel
 | Peers never appear | Both sides must be on the same subnet. Firewalls often block UDP 47474/TCP 47475 — allow them, or use `--peer <other-ip>` on at least one side. Some guest/enterprise Wi-Fi isolates clients (AP isolation); no LAN tool can work across that. |
 | Radar shows the peer but sends fail | On the LAN, TCP 47475 is likely blocked, or the peer already has something listening there. |
 | *relay sem conexão* (relay offline) | The bar under the header says why. Check the address and port, that `pdrop-relay` is running, and that its port is open. pdrop keeps retrying. |
-| Relay connected but no peers | Both devices need the very same secret, and the other one must not be *invisible*. |
+| Relay connected but no peers | Both devices need the same relay and the very same password, and the other one must not be *invisible*. |
 | "sem clipboard" flash | Install `wl-clipboard` (Wayland) or `xclip` (X11); on macOS this shouldn't happen. |
 | Clipboard bridge stops on its own | That's by design when the peer refuses, disconnects, or leaves — the header will say *ponte encerrada*. |
 | Two instances on the same machine | Fine on Linux (SO_REUSEPORT); they'll see each other. |
@@ -234,17 +235,13 @@ pdrop-relay --listen 0.0.0.0:443     # default
 
 ### Connecting to a relay
 
-Every device needs the relay address and the same room secret. Generate the secret once with `openssl rand -hex 16`; it needs at least 16 characters, but length alone does not make it strong.
+Every device needs the same relay address and the same password (the room secret). It needs at least 16 characters, but length alone does not make it strong, so prefer a generated one.
 
-The preferred way is to write the two files (the secret stays out of your shell history and process list):
+In the window, press **Relay** (or `w`, or click the relay status in the header) and then **Adicionar** (add). Give the server as `host:port` and the password; **Gerar** creates a random one and **Copiar** copies it so you can paste it on the other devices. You can save several relays, each with its own server and password. One at a time is in use: switch with **Usar**, turn it off with **Desativar**, no restart needed. The LAN still takes priority automatically.
 
-```bash
-mkdir -p ~/.config/pdrop
-echo relay.example.com:443 > ~/.config/pdrop/relay
-(umask 077; cat > ~/.config/pdrop/sala)   # paste the secret, press enter, then ctrl+d
-```
+They are kept in `~/.config/pdrop/relays`, readable only by you on Unix (the passwords are stored as plain text). The single-relay files `relay` and `sala` used before are converted the next time the window opens.
 
-`--relay HOST:PORT` and `--room SECRET` work too: the window saves them to those files, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the file. To turn the relay off, delete both files.
+`--relay HOST:PORT` and `--room SECRET` work too: the window saves them as the relay in use, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the saved relay in use. A password passed with `--room` ends up in your shell history and process list.
 
 An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN; if the direct connection or its handshake fails (a firewall, or Wi-Fi client isolation), the transfer goes through the relay.
 
@@ -281,6 +278,7 @@ src/
 ├── secure.rs  Noise XX encrypted channel, device identity, pairing code
 ├── ui.rs      The egui radar: pixel-art sprites, blips, panels, footer
 ├── relay.rs   Relay client: presence in a room and tunnels
+├── relays.rs  Saved relays: which one is in use, switching between them
 ├── clip.rs    Clipboard via system tools (wl-clipboard / xclip / xsel / pbcopy)
 └── bin/pdrop-relay.rs  Relay server: rooms + TCP tunnel
 assets/        Aseprite sources and exported PNGs (font, icons, sprites)

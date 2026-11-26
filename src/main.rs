@@ -4,6 +4,7 @@ mod clip;
 mod firewall;
 mod net;
 mod relay;
+mod relays;
 mod secure;
 mod ui;
 
@@ -45,7 +46,9 @@ pub struct App {
     pub sp: ui::Sprites,
     pub focus: bool,
     pub firewall: firewall::Shared,
-    pub relay: Option<relay::Status>,
+    pub relay: relays::Control,
+    /// tela dos relays, quando aberta
+    pub relay_ui: Option<ui::RelayPanel>,
     pub uid: u128,
     pub policy: Arc<Policy>,
     pub hist: Vec<Rec>,
@@ -620,8 +623,12 @@ pub fn home() -> PathBuf {
 
 pub const VIEWS: [&str; 3] = ["sonar", "seleção", "constelação"];
 
+fn config_dir() -> PathBuf {
+    home().join(".config/pdrop")
+}
+
 fn setting_path(k: &str) -> PathBuf {
-    home().join(".config/pdrop").join(k)
+    config_dir().join(k)
 }
 
 fn load_setting(k: &str) -> Option<String> {
@@ -685,54 +692,6 @@ fn owner_only(_p: &std::path::Path) -> std::io::Result<()> {
         std::fs::set_permissions(_p, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct RelayFlags {
-    addr: Option<String>,
-    room: Option<String>,
-}
-
-impl RelayFlags {
-    /// cada valor vem da opção, senão da variável de ambiente, senão do arquivo salvo.
-    /// Erro só interrompe quando uma opção foi passada: config salva quebrada não impede a LAN,
-    /// e o motivo volta no segundo valor.
-    fn load(&self) -> Result<(Option<relay::Config>, Option<String>), String> {
-        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let addr = self
-            .addr
-            .clone()
-            .or_else(|| env("PDROP_RELAY"))
-            .or_else(|| load_setting("relay"));
-        let room = self.room.clone().or_else(|| env("PDROP_ROOM")).or_else(|| {
-            let saved = load_setting("sala");
-            if saved.is_some() {
-                let _ = owner_only(&setting_path("sala"));
-            }
-            saved
-        });
-        match relay::config(addr.as_deref(), room.as_deref()) {
-            Err(e) if self.addr.is_none() && self.room.is_none() => {
-                eprintln!("relay desligado: {e}");
-                Ok((None, Some(e)))
-            }
-            r => r.map(|c| (c, None)),
-        }
-    }
-
-    /// guarda o que veio por opção, para as próximas vezes
-    fn save(&self) {
-        if let Some(a) = &self.addr
-            && let Err(e) = replace_file(&setting_path("relay"), a.trim(), false)
-        {
-            eprintln!("não consegui salvar o endereço do relay: {e}");
-        }
-        if let Some(s) = &self.room
-            && let Err(e) = replace_file(&setting_path("sala"), s.trim(), true)
-        {
-            eprintln!("não consegui salvar o segredo da sala: {e}");
-        }
-    }
 }
 
 const HIST_MAX: usize = 200;
@@ -922,8 +881,9 @@ fn window_icon() -> eframe::egui::IconData {
 
 const USAGE: &str = "uso: pdrop [--name NOME] [--peer IP]... [--dir PASTA] [--calm] [--relay HOST:PORTA] [--room SEGREDO]
      pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room SEGREDO] CAMINHO|TEXTO|- ...
-relay (aparelhos em outra rede): a janela salva --relay e --room em ~/.config/pdrop/{relay,sala};
-também valem PDROP_RELAY e PDROP_ROOM; prefira o arquivo sala, que não fica no histórico do shell
+relay (aparelhos em outra rede): configure na janela (botão Relay), que guarda vários em
+~/.config/pdrop/relays; --relay e --room também são salvos por ela. Valem ainda PDROP_RELAY e
+PDROP_ROOM. Pela janela ou pelo ambiente a senha não fica no histórico do shell
 recebidos vão para ~/Downloads (ou --dir); regras de destino em ~/.config/pdrop/destinos;
 IPs fixos (VPN/Tailscale) em ~/.config/pdrop/peers, um por linha";
 
@@ -937,7 +897,7 @@ fn proc_id() -> u64 {
 
 fn cli_send(args: Vec<String>) -> i32 {
     let (mut to, mut name_as, mut direct, mut inputs) = (None, None, saved_peers(), vec![]);
-    let mut flags = RelayFlags::default();
+    let mut flags = relays::Flags::default();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -963,7 +923,8 @@ fn cli_send(args: Vec<String>) -> i32 {
     if inputs.is_empty() {
         return usage();
     }
-    let relay = match flags.load() {
+    let saved = relays::load(&config_dir());
+    let relay = match relays::resolve(&flags, &relays::Env::read(), &saved) {
         Ok((r, _)) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -1160,7 +1121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut direct = saved_peers();
     let mut calm = false;
     let mut out_dir = None;
-    let mut flags = RelayFlags::default();
+    let mut flags = relays::Flags::default();
     while let Some(a) = args.next() {
         if a == "--calm" {
             calm = true;
@@ -1180,14 +1141,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let (relay, relay_off) = match flags.load() {
+    let mut saved = relays::load(&config_dir());
+    let relay_start = match relays::resolve(&flags, &relays::Env::read(), &saved) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     };
-    flags.save();
+    if let Err(e) = relays::remember(&config_dir(), &flags, &mut saved) {
+        eprintln!("{e}");
+    }
     let id = proc_id();
     let dir = out_dir.unwrap_or_else(|| {
         std::env::var_os("SNAP_REAL_HOME")
@@ -1226,26 +1190,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direct,
     )?;
 
-    let mut relay_status =
-        relay_off.map(|why| relay::Status::new(Mutex::new(relay::Link::Off(why))));
-    if let Some(cfg) = relay {
+    let incoming: relay::Incoming = {
         let (tx, grants, rules) = (tx.clone(), grants.clone(), policy.clone());
-        let incoming: relay::Incoming = Arc::new(move |s| {
+        Arc::new(move |s| {
             let _ = net::recv(s, &tx, &dir, &grants, &rules);
-        });
-        relay_status = Some(relay::watch(
-            cfg,
-            relay::Me {
-                id,
-                uid,
-                name: shared_name.clone(),
-                color: shared_color.clone(),
-                policy: policy.clone(),
-            },
-            peers.clone(),
-            incoming,
-        ));
-    }
+        })
+    };
+    let relay = relays::Control::new(
+        config_dir(),
+        saved,
+        relay::Me {
+            id,
+            uid,
+            name: shared_name.clone(),
+            color: shared_color.clone(),
+            policy: policy.clone(),
+        },
+        peers.clone(),
+        incoming,
+        relay_start,
+    );
 
     let firewall = firewall::watch();
 
@@ -1303,7 +1267,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clip_sel: None,
                 marked: Default::default(),
                 firewall,
-                relay: relay_status,
+                relay,
+                relay_ui: None,
                 view: load_setting("visao")
                     .and_then(|s| s.parse().ok())
                     .filter(|v| (*v as usize) < VIEWS.len())
@@ -1341,7 +1306,7 @@ mod tests {
     #[test]
     fn replace_file_swaps_the_whole_file() {
         let dir = std::env::temp_dir().join(format!("pdrop-replace-{}", std::process::id()));
-        let p = dir.join("sala");
+        let p = dir.join("relays");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&p, "um segredo antigo bem mais comprido").unwrap();
         super::replace_file(&p, "novo", true).unwrap();

@@ -168,6 +168,7 @@ Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentr
 | `p` | Abre o histórico de clipboards recebidos (`↑/↓`, `enter` para restaurar) |
 | `g` | Abre ou fecha o histórico (`↑/↓` navegam, `enter` mostra na pasta, `e` reenvia) |
 | `y` / `n` | Aceita / recusa uma transferência ou pedido de ponte recebido |
+| `w` | Abre ou fecha a tela dos relays (também pelo botão *Relay*) |
 | `esc` | Cancela o prompt ou seletor aberto |
 | `q`, `ctrl+c` | Sai |
 
@@ -218,7 +219,7 @@ Na rede local tudo é ponto a ponto, sem servidor. O [relay](#relay-pdrop-relay)
 | Os peers nunca aparecem | Os dois lados precisam estar na mesma sub-rede. Firewalls costumam bloquear UDP 47474/TCP 47475 — libere essas portas, ou use `--peer <ip-do-outro>` em pelo menos um lado. Algumas redes Wi-Fi de visitantes/corporativas isolam os clientes (AP isolation); nenhuma ferramenta de rede local funciona assim. |
 | O radar mostra o peer, mas o envio falha | Na rede local, provavelmente o TCP 47475 está bloqueado, ou o peer já tem outra coisa escutando nessa porta. |
 | *relay sem conexão* | A barra abaixo do cabeçalho diz o motivo. Confira o endereço e a porta, se o `pdrop-relay` está rodando e se a porta dele está aberta. O pdrop continua tentando. |
-| Relay conectado, mas sem peers | Os dois aparelhos precisam do mesmo segredo, e o outro não pode estar *invisível*. |
+| Relay conectado, mas sem peers | Os dois aparelhos precisam do mesmo relay e da mesma senha, e o outro não pode estar *invisível*. |
 | Aviso "sem clipboard" | Instale `wl-clipboard` (Wayland) ou `xclip` (X11); no macOS isso não deveria acontecer. |
 | A ponte de clipboard para sozinha | É de propósito quando o peer recusa, desconecta ou sai — o cabeçalho avisa *ponte encerrada*. |
 | Duas instâncias na mesma máquina | Funciona no Linux (SO_REUSEPORT); elas se enxergam. |
@@ -234,17 +235,13 @@ pdrop-relay --listen 0.0.0.0:443     # padrão
 
 ### Conectando a um relay
 
-Todo aparelho precisa do endereço do relay e do mesmo segredo de sala. Gere o segredo uma vez com `openssl rand -hex 16`; ele precisa de pelo menos 16 caracteres, mas só o tamanho não o torna forte.
+Todos os aparelhos precisam do mesmo endereço de relay e da mesma senha (o segredo da sala). Ela precisa de pelo menos 16 caracteres, mas só o tamanho não a torna forte, então prefira uma gerada.
 
-O jeito preferido é escrever os dois arquivos (o segredo não fica no histórico do shell nem na lista de processos):
+Na janela, aperte **Relay** (ou `w`, ou clique no estado do relay no cabeçalho) e depois **Adicionar**. Informe o servidor como `host:porta` e a senha; **Gerar** cria uma aleatória e **Copiar** a copia para você colar nos outros aparelhos. Dá para salvar vários relays, cada um com seu servidor e sua senha. Um por vez fica em uso: troque com **Usar** e desligue com **Desativar**, sem reiniciar. A rede local continua tendo prioridade, automaticamente.
 
-```bash
-mkdir -p ~/.config/pdrop
-echo relay.exemplo.com:443 > ~/.config/pdrop/relay
-(umask 077; cat > ~/.config/pdrop/sala)   # cole o segredo, dê enter e depois ctrl+d
-```
+Eles ficam em `~/.config/pdrop/relays`, que no Unix só você pode ler (as senhas são guardadas em texto puro). Os arquivos `relay` e `sala`, de quando só cabia um relay, são convertidos na próxima vez que a janela abrir.
 
-`--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva nesses arquivos, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do arquivo. Para desligar o relay, apague os dois arquivos.
+`--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva como o relay em uso, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do relay salvo em uso. Uma senha passada com `--room` fica no histórico do shell e na lista de processos.
 
 Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN; se a conexão direta ou o handshake dela falhar (firewall, ou isolamento de clientes no Wi-Fi), a transferência segue pelo relay.
 
@@ -281,6 +278,7 @@ src/
 ├── secure.rs  Canal criptografado Noise XX, identidade do aparelho, código de pareamento
 ├── ui.rs      O radar em egui: sprites em pixel art, pontos, painéis, rodapé
 ├── relay.rs   Cliente do relay: presença na sala e túneis
+├── relays.rs  Relays salvos: qual está em uso e a troca entre eles
 ├── clip.rs    Clipboard via ferramentas do sistema (wl-clipboard / xclip / xsel / pbcopy)
 └── bin/pdrop-relay.rs  Servidor relay: salas + túnel TCP
 assets/        Fontes em Aseprite e PNGs exportados (fonte, ícones, sprites)
