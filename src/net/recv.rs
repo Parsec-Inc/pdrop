@@ -323,6 +323,8 @@ pub(super) fn rel_components(rel: &str) -> Option<Vec<String>> {
         .map(|c| {
             c.chars()
                 .filter(|c| !c.is_control() && *c != '\\')
+                // no Windows, `C:x` num join descarta a pasta base (e `a:b` grava num fluxo oculto do NTFS)
+                .map(|c| if cfg!(windows) && c == ':' { '_' } else { c })
                 .collect()
         })
         .collect();
@@ -453,6 +455,19 @@ fn create_unique_dir(dir: &Path, name: &str) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn received_names_stay_inside_the_folder() {
+        let base = Path::new("recebidos");
+        for rel in ["C:payload.bin", "c:", "pasta/D:x", "a\\C:\\x"] {
+            let mut p = base.to_path_buf();
+            for part in rel_components(rel).unwrap() {
+                let parent = p.clone();
+                p.push(part);
+                assert_eq!(p.parent(), Some(parent.as_path()), "{rel}");
+            }
+        }
+    }
 
     #[test]
     fn routing() {
