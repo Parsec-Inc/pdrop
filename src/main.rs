@@ -996,6 +996,15 @@ fn usage() -> i32 {
     2
 }
 
+/// quem reabre o app muda de id de sessão e a entrada antiga continua aqui: fica a mais recente
+/// de cada identidade
+fn one_per_device(mut v: Vec<Peer>) -> Vec<Peer> {
+    v.sort_by_key(|p| std::cmp::Reverse(p.seen));
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(p.uid));
+    v
+}
+
 /// tempo para um aparelho achado pelo relay também aparecer na LAN, que é o caminho preferido
 const LAN_GRACE: Duration = Duration::from_secs(3);
 
@@ -1067,6 +1076,7 @@ fn cli_run(
             .filter(|p| !(matches!(p.route, net::Route::Relay(_)) && p.uid == uid))
             .cloned()
             .collect();
+        let v = one_per_device(v);
         // com relay, vale esperar um pouco: pela LAN para preferi-la, e pelo relay para
         // ter um segundo caminho caso a conexão direta esteja bloqueada
         let found = pick(&v).filter(|p| {
@@ -1308,6 +1318,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn send_keeps_the_latest_session_of_each_device() {
+        use super::{Peer, net::Route};
+        let now = std::time::Instant::now();
+        let peer = |id, uid, age| Peer {
+            id,
+            name: "a".into(),
+            route: Route::Lan(([127, 0, 0, 1], 1).into()),
+            fallback: None,
+            seen: now - std::time::Duration::from_secs(age),
+            born: now,
+            rtt: None,
+            color: 0,
+            uid,
+        };
+        let v = super::one_per_device(vec![peer(1, 7, 3), peer(2, 7, 0), peer(3, 8, 1)]);
+        let ids: Vec<u64> = v.iter().map(|p| p.id).collect();
+        assert_eq!(ids, [2, 3]);
+    }
+
     #[test]
     fn replace_file_swaps_the_whole_file() {
         let dir = std::env::temp_dir().join(format!("pdrop-replace-{}", std::process::id()));

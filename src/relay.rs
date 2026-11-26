@@ -533,22 +533,27 @@ mod tests {
             assert_eq!(std::fs::read(out.join("origem").join(f)).unwrap(), big);
         }
 
-        // porta da LAN inacessível: a transferência sai pelo relay
+        // porta da LAN inacessível, ou que conecta e não completa o handshake: sai pelo relay
         let closed = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap();
+        let broken = TcpListener::bind("127.0.0.1:0").unwrap();
+        let broken_addr = broken.local_addr().unwrap();
+        thread::spawn(move || broken.incoming().for_each(drop));
         let Route::Relay(cfg) = to.route.clone() else {
             panic!("esperava a rota pelo relay");
         };
-        let blocked = net::Peer {
-            route: Route::Lan(closed),
-            fallback: Some(cfg),
-            ..to.clone()
-        };
-        net::send(blocked, who.clone(), vec!["pela volta".into()], tx.clone());
-        assert_eq!(sent(), Ok("enviado".into()));
-        assert_eq!(received(), Ok("pela volta".into()));
+        for addr in [closed, broken_addr] {
+            let blocked = net::Peer {
+                route: Route::Lan(addr),
+                fallback: Some(cfg.clone()),
+                ..to.clone()
+            };
+            net::send(blocked, who.clone(), vec!["pela volta".into()], tx.clone());
+            assert_eq!(sent(), Ok("enviado".into()));
+            assert_eq!(received(), Ok("pela volta".into()));
+        }
 
         // ninguém com esse uid na sala
         let ghost = net::Peer {

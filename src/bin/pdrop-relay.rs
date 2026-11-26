@@ -31,6 +31,8 @@ const MAX_TUNNEL_RATE: u32 = 120;
 const WINDOW: Duration = Duration::from_secs(60);
 const MAX_LINE: usize = 512;
 const WAIT: Duration = Duration::from_secs(30);
+/// prazo para o primeiro pedido chegar inteiro
+const FIRST_LINE: Duration = Duration::from_secs(10);
 const WRITE: Duration = Duration::from_secs(5);
 const PAIR: Duration = Duration::from_secs(10);
 const IDLE: u64 = 120;
@@ -177,6 +179,30 @@ fn read_line(s: &mut impl Read) -> io::Result<String> {
     Ok(l)
 }
 
+/// leitura com hora para acabar: o prazo do socket sozinho recomeça a cada byte
+struct Until<'a> {
+    s: &'a mut TcpStream,
+    end: Instant,
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.s.set_read_timeout(Some(left))?;
+        self.s.read(b)
+    }
+}
+
+fn read_line_within(s: &mut TcpStream, limit: Duration) -> io::Result<String> {
+    read_line(&mut Until {
+        s,
+        end: Instant::now() + limit,
+    })
+}
+
 fn room_id(s: &str) -> io::Result<String> {
     if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(s.to_ascii_lowercase())
@@ -304,13 +330,22 @@ fn hello(
             ip,
             epoch,
         };
+        let pending = st.pending.lock().unwrap();
+        let invites = pending
+            .iter()
+            .filter(|(_, p)| p.room == room && p.uid == uid);
+        // quem reconecta recebe de novo os convites que podem ter ido para a conexão antiga
+        for (tok, _) in invites {
+            let _ = member.tx.try_send(format!("INCOMING {tok:x}\n"));
+        }
+        drop(pending);
         if let Some(old) = rooms.entry(room.clone()).or_default().insert(uid, member) {
             let _ = old.sock.shutdown(Shutdown::Both);
         }
     }
     // qualquer erro daqui em diante, inclusive no envio do OK, passa pela limpeza abaixo
     let res: io::Result<()> = loop {
-        match read_line(&mut s) {
+        match read_line_within(&mut s, WAIT) {
             Ok(l) => {
                 if let Some(t) = l.strip_prefix("BEACON ")
                     && !broadcast(st, &room, uid, epoch, &format!("BEACON {uid:x} {t}\n"))
@@ -338,30 +373,27 @@ fn hello(
 }
 
 fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()> {
-    let member = st
-        .rooms
-        .lock()
-        .unwrap()
-        .get(room)
-        .and_then(|r| r.get(&target))
-        .map(|m| m.tx.clone());
-    let Some(member) = member else {
-        return s.write_all(b"ERR\n");
-    };
     let tok = token()?;
     let (tx, rx) = mpsc::channel();
-    st.pending.lock().unwrap().insert(
-        tok,
-        Pending {
-            room: room.into(),
-            uid: target,
-            tx,
-        },
-    );
-    let sent = member.try_send(format!("INCOMING {tok:x}\n"));
-    // não segura a fila do alvo enquanto espera
-    drop(member);
-    let other = sent.ok().and_then(|_| rx.recv_timeout(PAIR).ok());
+    // com as salas travadas, uma reconexão do alvo vem antes, e ele recebe o convite na conexão
+    // nova, ou depois, e já encontra o pedido pendente para reenviar
+    let sent = {
+        let rooms = st.rooms.lock().unwrap();
+        rooms.get(room).and_then(|r| r.get(&target)).map(|m| {
+            st.pending.lock().unwrap().insert(
+                tok,
+                Pending {
+                    room: room.into(),
+                    uid: target,
+                    tx,
+                },
+            );
+            m.tx.try_send(format!("INCOMING {tok:x}\n")).is_ok()
+        })
+    };
+    let other = sent
+        .filter(|&ok| ok)
+        .and_then(|_| rx.recv_timeout(PAIR).ok());
     st.pending.lock().unwrap().remove(&tok);
     // a vaga do ACCEPT dura enquanto o túnel durar
     let Some((mut b, _slot)) = other else {
@@ -441,10 +473,9 @@ fn pump(mut from: TcpStream, mut to: TcpStream, t0: Instant, last: &AtomicU64) {
 }
 
 fn handle(st: &State, mut s: TcpStream, mut slot: Slot) -> io::Result<()> {
-    s.set_read_timeout(Some(WAIT))?;
     s.set_write_timeout(Some(WRITE))?;
     s.set_nodelay(true)?;
-    let line = read_line(&mut s)?;
+    let line = read_line_within(&mut s, FIRST_LINE)?;
     // linhas inválidas caem na cota menor
     let tunnel = line.starts_with("DIAL ") || line.starts_with("ACCEPT ");
     let ip = slot.ip;
@@ -569,6 +600,64 @@ mod tests {
         writeln!(new, "BEACON voltei").unwrap();
         // sem GONE no meio: o uid nunca saiu da sala
         assert_eq!(read_line(&mut watcher).unwrap(), "BEACON 1 voltei");
+    }
+
+    #[test]
+    fn a_member_holds_its_slot_while_connected() {
+        let (addr, st) = start();
+        let mut a = conn(addr, &format!("HELLO {} 1 1", "a".repeat(64)));
+        assert_eq!(read_line(&mut a).unwrap(), "OK");
+        let held = |kind| {
+            let c = st.conns.lock().unwrap();
+            c.get(&(addr.ip(), kind)).copied().unwrap_or(0)
+        };
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!((held(Kind::Control), held(Kind::New)), (1, 0));
+        drop(a);
+        let end = Instant::now() + Duration::from_secs(3);
+        while held(Kind::Control) != 0 {
+            assert!(Instant::now() < end, "a vaga não voltou");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_dripped_line_has_a_deadline() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut s, _) = l.accept().unwrap();
+        let drip = thread::spawn(move || {
+            for _ in 0..40 {
+                if client.write_all(b"a").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let t0 = Instant::now();
+        // cada byte chega bem dentro do prazo, mas a linha nunca termina
+        assert!(read_line_within(&mut s, Duration::from_millis(400)).is_err());
+        assert!(t0.elapsed() < Duration::from_millis(1500));
+        drop(s);
+        drip.join().unwrap();
+    }
+
+    #[test]
+    fn a_reconnecting_target_gets_the_pending_invite() {
+        let (addr, _) = start();
+        let room = "a".repeat(64);
+        let mut old = conn(addr, &format!("HELLO {room} 2 7"));
+        assert_eq!(read_line(&mut old).unwrap(), "OK");
+        let mut d = conn(addr, &format!("DIAL {room} 2"));
+        let invite = read_line(&mut old).unwrap();
+        // o alvo volta antes de aceitar
+        let mut new = conn(addr, &format!("HELLO {room} 2 7"));
+        assert_eq!(read_line(&mut new).unwrap(), "OK");
+        assert_eq!(read_line(&mut new).unwrap(), invite);
+        let tok = invite.strip_prefix("INCOMING ").unwrap();
+        let mut e = conn(addr, &format!("ACCEPT {room} 2 {tok}"));
+        assert_eq!(read_line(&mut d).unwrap(), "OK");
+        assert_eq!(read_line(&mut e).unwrap(), "OK");
     }
 
     #[test]

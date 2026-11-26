@@ -1025,39 +1025,51 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
-fn connect(to: &Peer) -> io::Result<TcpStream> {
+/// canal cifrado com o aparelho certo. Pela LAN, uma falha na conexão, no handshake ou na
+/// identidade passa a vez ao relay, que exige a mesma identidade
+fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
+    let verify = |tcp: TcpStream| {
+        tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
+        let s = secure::handshake(tcp, key, true)?;
+        if s.remote != to.uid {
+            return Err(io::Error::other(
+                "a identidade desse aparelho mudou ou não confere: recusei por segurança",
+            ));
+        }
+        // daqui em diante a resposta depende de alguém aceitar
+        s.tcp().set_read_timeout(Some(Duration::from_secs(60)))?;
+        Ok(s)
+    };
     let via_relay = |cfg: &relay::Config| {
         relay::dial(cfg, to.uid)
             .map_err(|e| io::Error::new(e.kind(), format!("não conectou pelo relay ({e})")))
+            .and_then(verify)
     };
     let addr = match &to.route {
         Route::Lan(addr) => addr,
         Route::Relay(cfg) => return via_relay(cfg),
     };
-    TcpStream::connect_timeout(addr, Duration::from_secs(5)).or_else(|e| {
-        let lan = io::Error::new(
-            e.kind(),
-            format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"),
-        );
-        match &to.fallback {
+    TcpStream::connect_timeout(addr, Duration::from_secs(5))
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
+                ),
+            )
+        })
+        .and_then(verify)
+        .or_else(|lan| match &to.fallback {
             Some(cfg) => {
                 via_relay(cfg).map_err(|r| io::Error::new(r.kind(), format!("{lan}; {r}")))
             }
             None => Err(lan),
-        }
-    })
+        })
 }
 
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
-    let tcp = connect(to)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let mut s = secure::handshake(tcp, &me.key, true)?;
-    if s.remote != to.uid {
-        return Err(io::Error::other(
-            "a identidade desse aparelho mudou ou não confere: recusei por segurança",
-        ));
-    }
+    let mut s = connect(to, &me.key)?;
     let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
     writeln!(
         s,

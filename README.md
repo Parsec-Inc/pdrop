@@ -246,7 +246,7 @@ echo relay.example.com:443 > ~/.config/pdrop/relay
 
 `--relay HOST:PORT` and `--room SECRET` work too: the window saves them to those files, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the file. To turn the relay off, delete both files.
 
-An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN; if the direct connection fails (a firewall, or Wi-Fi client isolation), the transfer goes through the relay.
+An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN; if the direct connection or its handshake fails (a firewall, or Wi-Fi client isolation), the transfer goes through the relay.
 
 **Protocol** — one line per message, ending in `\n`:
 
@@ -254,12 +254,12 @@ An invalid flag stops pdrop; an invalid saved or environment value only disables
 |---------|---------|
 | `HELLO <room> <uid> <key>` | Control connection. The relay answers `OK` (or closes). While a uid is in the room, only the same `key` (hex, up to 128 bits) can replace it; the app derives it from the device's private key and the room. |
 | `BEACON <text>` | Client → relay, every few seconds; forwarded to the room. The app uses 1.5 s and `<id>\|<color+icon>\|<visibility>\|<name>`. |
-| any other line, e.g. `PING` | Client → relay: ignored, but keeps the connection alive (used when invisible). Silence for more than 30 s drops the member. |
+| any other line, e.g. `PING` | Client → relay: ignored, but keeps the connection alive (used when invisible). A member that goes 30 s without completing a line is dropped. |
 | `BEACON <uid> <text>`, `GONE <uid>`, `INCOMING <token>` | Relay → client: presence of another member, a member left, someone wants to connect. |
 | `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
 | `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
 
-**Limits** — 2048 connections in total; per IP, 32 control connections, 32 tunnel connections, 32 still waiting to send their first line, and 8 rooms; 32 members per room, 1024 rooms; per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), with at most 10,000 entries tracked; 10 s for the target to accept, 120 s without traffic closes a tunnel. Presence messages for a member that reads too slowly are dropped. Room ids are never logged.
+**Limits** — 2048 connections in total; per IP, 32 control connections, 32 tunnel connections, 32 still waiting to send their first line, and 8 rooms; 32 members per room, 1024 rooms; per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), with at most 10,000 entries tracked; 10 s for the first request line, 10 s for the target to accept, 120 s without traffic closes a tunnel. Presence messages for a member that reads too slowly are dropped. Room ids are never logged.
 
 **Known shortcuts**
 - The relay cannot verify that a uid belongs to whoever joins with it. The membership key stops other members from replacing a connected device, but one that joins with an offline device's uid keeps it out until it leaves. Transfers cannot be hijacked: the Noise handshake checks the uid.

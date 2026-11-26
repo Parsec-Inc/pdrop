@@ -246,7 +246,7 @@ echo relay.exemplo.com:443 > ~/.config/pdrop/relay
 
 `--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva nesses arquivos, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do arquivo. Para desligar o relay, apague os dois arquivos.
 
-Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN; se a conexão direta falhar (firewall, ou isolamento de clientes no Wi-Fi), a transferência segue pelo relay.
+Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN; se a conexão direta ou o handshake dela falhar (firewall, ou isolamento de clientes no Wi-Fi), a transferência segue pelo relay.
 
 **Protocolo** — uma linha por mensagem, terminada em `\n`:
 
@@ -254,12 +254,12 @@ Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido s
 |----------|-------------|
 | `HELLO <sala> <uid> <chave>` | Conexão de controle. O relay responde `OK` (ou fecha). Enquanto um uid está na sala, só a mesma `chave` (hex, até 128 bits) pode substituí-lo; o app a deriva da chave privada do aparelho e da sala. |
 | `BEACON <texto>` | Cliente → relay, a cada poucos segundos; repassado à sala. O app usa 1,5 s e `<id>\|<cor+ícone>\|<visibilidade>\|<nome>`. |
-| qualquer outra linha, ex.: `PING` | Cliente → relay: ignorada, mas mantém a conexão viva (usada no modo invisível). Mais de 30 s de silêncio derruba o membro. |
+| qualquer outra linha, ex.: `PING` | Cliente → relay: ignorada, mas mantém a conexão viva (usada no modo invisível). O membro que passa 30 s sem completar uma linha é derrubado. |
 | `BEACON <uid> <texto>`, `GONE <uid>`, `INCOMING <token>` | Relay → cliente: presença de outro membro, um membro saiu, alguém quer conectar. |
 | `DIAL <sala> <uid_alvo>` | Nova conexão pedindo um túnel até um membro. `OK` (daí em diante, bytes crus) ou `ERR`. |
 | `ACCEPT <sala> <uid> <token>` | Resposta do alvo ao `INCOMING`, em uma nova conexão. `OK`, e o mesmo túnel. |
 
-**Limites** — 2048 conexões no total; por IP, 32 conexões de controle, 32 de túnel, 32 ainda sem a primeira linha e 8 salas; 32 membros por sala, 1024 salas; por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), com no máximo 10.000 entradas acompanhadas; 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Mensagens de presença para um membro que lê devagar demais são descartadas. Ids de sala nunca são registrados em log.
+**Limites** — 2048 conexões no total; por IP, 32 conexões de controle, 32 de túnel, 32 ainda sem a primeira linha e 8 salas; 32 membros por sala, 1024 salas; por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), com no máximo 10.000 entradas acompanhadas; 10 s para a primeira linha chegar, 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Mensagens de presença para um membro que lê devagar demais são descartadas. Ids de sala nunca são registrados em log.
 
 **Atalhos conhecidos**
 - O relay não tem como conferir se um uid pertence a quem entra com ele. A chave de membro impede que outros membros substituam um aparelho conectado, mas quem entrar com o uid de um aparelho desconectado o mantém de fora até sair. Não dá para sequestrar uma transferência: o handshake Noise confere o uid.
