@@ -94,7 +94,7 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Status {
         let mut last_error = String::new();
         loop {
             let start = Instant::now();
-            let error = match connect(&cfg, me.uid) {
+            let error = match connect(&cfg, &me) {
                 Ok(s) => {
                     eprintln!("relay: conectado a {}", cfg.addr);
                     last_error.clear();
@@ -133,7 +133,15 @@ fn dial_tcp(addr: &str) -> io::Result<TcpStream> {
     Err(last)
 }
 
-fn connect(cfg: &Config, uid: u128) -> io::Result<BufReader<TcpStream>> {
+/// prova que quem volta a uma sala com o mesmo uid é o mesmo aparelho. Sai da chave privada,
+/// então os outros membros não a conhecem, e muda de uma sala para outra
+fn membership_key(private: &[u8; 32], room: &str) -> u128 {
+    let material = [private.as_slice(), room.as_bytes()].concat();
+    let k = blake3::derive_key("pdrop relay membership v1", &material);
+    u128::from_be_bytes(k[..16].try_into().unwrap())
+}
+
+fn connect(cfg: &Config, me: &Me) -> io::Result<BufReader<TcpStream>> {
     let mut s = dial_tcp(&cfg.addr)?;
     s.set_read_timeout(Some(TIMEOUT))?;
     s.set_write_timeout(Some(TIMEOUT))?;
@@ -147,7 +155,8 @@ fn connect(cfg: &Config, uid: u128) -> io::Result<BufReader<TcpStream>> {
     // com beacons sem confirmação o keepalive não dispara; no Linux isto cobre o caso
     #[cfg(target_os = "linux")]
     sock.set_tcp_user_timeout(Some(Duration::from_secs(30)))?;
-    s.write_all(format!("HELLO {} {uid:x}\n", cfg.room).as_bytes())?;
+    let key = membership_key(&me.policy.key, &cfg.room);
+    s.write_all(format!("HELLO {} {:x} {key:x}\n", cfg.room, me.uid).as_bytes())?;
     let mut r = BufReader::new(s);
     if read_line(&mut r)? != "OK" {
         return Err(io::Error::other("o relay recusou a entrada na sala"));
@@ -307,12 +316,16 @@ fn handle(line: &str, cfg: &Arc<Config>, me: &Me, peers: &Peers) {
     );
 }
 
-/// tira do radar quem só era alcançado pelo relay (um uid, ou todos)
+/// o relay deixou de alcançar um uid (ou todos): some do radar quem só era alcançado por ele,
+/// e quem está na LAN perde o caminho alternativo
 fn drop_relay_peers(peers: &Peers, uid: Option<u128>) {
-    peers
-        .lock()
-        .unwrap()
-        .retain(|_, p| !matches!(p.route, Route::Relay(_)) || uid.is_some_and(|u| u != p.uid));
+    peers.lock().unwrap().retain(|_, p| {
+        if uid.is_some_and(|u| u != p.uid) {
+            return true;
+        }
+        p.fallback = None;
+        !p.via_relay()
+    });
 }
 
 #[cfg(test)]
@@ -520,6 +533,23 @@ mod tests {
             assert_eq!(std::fs::read(out.join("origem").join(f)).unwrap(), big);
         }
 
+        // porta da LAN inacessível: a transferência sai pelo relay
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let Route::Relay(cfg) = to.route.clone() else {
+            panic!("esperava a rota pelo relay");
+        };
+        let blocked = net::Peer {
+            route: Route::Lan(closed),
+            fallback: Some(cfg),
+            ..to.clone()
+        };
+        net::send(blocked, who.clone(), vec!["pela volta".into()], tx.clone());
+        assert_eq!(sent(), Ok("enviado".into()));
+        assert_eq!(received(), Ok("pela volta".into()));
+
         // ninguém com esse uid na sala
         let ghost = net::Peer {
             uid: ruid ^ 1,
@@ -543,6 +573,15 @@ mod tests {
         net::upsert(&peers, 4, "perto".into(), lan, 0, 0xa, Instant::now());
         assert_eq!(peers.lock().unwrap().len(), 3);
         assert_eq!(peers.lock().unwrap()[&3].name, "com|barra");
+
+        // quem está na LAN também é visto pelo relay: o GONE só tira o caminho alternativo
+        let lan = Route::Lan(([127, 0, 0, 1], 1).into());
+        net::upsert(&peers, 5, "dois".into(), lan, 0, 0xf, Instant::now());
+        handle("BEACON f 5|0|0|dois", &me, &peers);
+        assert!(peers.lock().unwrap()[&5].fallback.is_some());
+        handle("GONE f", &me, &peers);
+        assert!(peers.lock().unwrap()[&5].fallback.is_none());
+        peers.lock().unwrap().remove(&5);
 
         handle("GONE a", &me, &peers);
         let mut left: Vec<u64> = peers.lock().unwrap().keys().copied().collect();

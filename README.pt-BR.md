@@ -206,7 +206,7 @@ Na rede local tudo é ponto a ponto, sem servidor. O [relay](#relay-pdrop-relay)
 - As transferências são criptografadas e autenticadas ponta a ponta, pela rede local ou pelo relay; os beacons não são (na rede local, qualquer um vê nome, cor, ícone e uid, a menos que você use os modos de visibilidade).
 - Qualquer pessoa na mesma rede pode ver o seu beacon do pdrop (nome, cor, ícone) — é assim que a descoberta funciona. As transferências são explícitas e exigem o y/n de quem recebe, exceto mensagens de texto de peers que você marcou como confiáveis e cópias da ponte depois de uma liberação única (que você corta com `x`).
 - **Com relay não há TLS.** Quem observa a rede entre você e o relay, e quem o opera, consegue ler o seu IP, o id da sala e os seus beacons (nome, cor, ícone, visibilidade, ids do aparelho). O que você envia, incluindo nomes de arquivos e cabeçalhos da transferência, fica dentro do canal cifrado, mas o relay vê quem fala com quem, quando e o volume.
-- **O id da sala basta para entrar.** Quem o capturar não precisa do segredo: vê os aparelhos visíveis, pode mandar pedidos de transferência (que ainda exigem o seu y/n) e derrubar um membro reusando o uid dele. Não consegue se passar por um aparelho confiável nem ler as suas transferências. Nomes podem ser copiados, então compare o código de pareamento antes de aceitar de alguém novo. Se a sala pode ter vazado, troque o segredo em todos os aparelhos.
+- **O id da sala basta para entrar.** Quem o capturar não precisa do segredo: vê os aparelhos visíveis, pode mandar pedidos de transferência (que ainda exigem o seu y/n) e tomar o lugar de um aparelho na sala: repetindo a chave de membro capturada, ou entrando com o uid dele enquanto está desconectado. Não consegue se passar por um aparelho confiável nem ler as suas transferências. Nomes podem ser copiados, então compare o código de pareamento antes de aceitar de alguém novo. Se a sala pode ter vazado, troque o segredo em todos os aparelhos.
 - Os modos de visibilidade são aplicados pelo app que recebe. No relay, um aparelho *invisível* não manda beacon, mas continua membro da sala e alcançável por quem tiver o id da sala e o uid dele; em *só confiáveis*, os beacons ainda chegam à sala toda.
 - A ponte de clipboard envia **tudo o que você copia** enquanto está ligada. Gerenciadores de senha costumam contornar o clipboard do sistema, mas confira antes de ligar a ponte numa rede compartilhada.
 - Os nomes de arquivo recebidos são saneados (sem caminhos, sem caracteres de controle) e o tamanho do conteúdo é limitado, mas, como em qualquer ferramenta de transferência na rede local, use entre pessoas em quem você confia.
@@ -246,29 +246,31 @@ echo relay.exemplo.com:443 > ~/.config/pdrop/relay
 
 `--relay HOST:PORTA` e `--room SEGREDO` também funcionam: a janela os salva nesses arquivos, e o `pdrop send` usa só naquela execução. `PDROP_RELAY` e `PDROP_ROOM` também valem e nunca são salvos. Cada valor vem da opção, depois da variável, depois do arquivo. Para desligar o relay, apague os dois arquivos.
 
-Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN.
+Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido só desliga o relay, com um aviso. Um aparelho alcançável pelos dois caminhos é usado pela LAN; se a conexão direta falhar (firewall, ou isolamento de clientes no Wi-Fi), a transferência segue pelo relay.
 
 **Protocolo** — uma linha por mensagem, terminada em `\n`:
 
 | Mensagem | Significado |
 |----------|-------------|
-| `HELLO <sala> <uid>` | Conexão de controle. O relay responde `OK` (ou fecha). |
+| `HELLO <sala> <uid> <chave>` | Conexão de controle. O relay responde `OK` (ou fecha). Enquanto um uid está na sala, só a mesma `chave` (hex, até 128 bits) pode substituí-lo; o app a deriva da chave privada do aparelho e da sala. |
 | `BEACON <texto>` | Cliente → relay, a cada poucos segundos; repassado à sala. O app usa 1,5 s e `<id>\|<cor+ícone>\|<visibilidade>\|<nome>`. |
 | qualquer outra linha, ex.: `PING` | Cliente → relay: ignorada, mas mantém a conexão viva (usada no modo invisível). Mais de 30 s de silêncio derruba o membro. |
 | `BEACON <uid> <texto>`, `GONE <uid>`, `INCOMING <token>` | Relay → cliente: presença de outro membro, um membro saiu, alguém quer conectar. |
 | `DIAL <sala> <uid_alvo>` | Nova conexão pedindo um túnel até um membro. `OK` (daí em diante, bytes crus) ou `ERR`. |
 | `ACCEPT <sala> <uid> <token>` | Resposta do alvo ao `INCOMING`, em uma nova conexão. `OK`, e o mesmo túnel. |
 
-**Limites** — 32 conexões por IP, 32 membros por sala, 1024 salas, por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Ids de sala nunca são registrados em log.
+**Limites** — 2048 conexões no total; por IP, 32 conexões de controle, 32 de túnel, 32 ainda sem a primeira linha e 8 salas; 32 membros por sala, 1024 salas; por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), com no máximo 10.000 entradas acompanhadas; 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Mensagens de presença para um membro que lê devagar demais são descartadas. Ids de sala nunca são registrados em log.
 
 **Atalhos conhecidos**
-- Um uid repetido na sala substitui o antigo (para a reconexão funcionar). Um membro pode derrubar outro com um uid forjado, mas não consegue sequestrar uma transferência: o handshake Noise confere o uid.
-- Atrás de um NAT compartilhado, os usuários dividem o limite de requisições por IP.
+- O relay não tem como conferir se um uid pertence a quem entra com ele. A chave de membro impede que outros membros substituam um aparelho conectado, mas quem entrar com o uid de um aparelho desconectado o mantém de fora até sair. Não dá para sequestrar uma transferência: o handshake Noise confere o uid.
+- Os limites de salas e por IP só encarecem lotar o relay; quem tem muitos endereços ainda consegue. Qualquer um que o alcance pode criar salas.
+- Atrás de um NAT compartilhado, os usuários dividem os limites por IP.
 - Sem TLS entre cliente e relay: o conteúdo já é cifrado, mas o id da sala e os beacons trafegam em claro (veja [Privacidade](#notas-de-privacidade-e-segurança)).
 - Duas janelas com a mesma identidade (mesmo usuário na mesma máquina) se substituem na sala. O `pdrop send` evita isso entrando com um uid descartável.
-- Os tokens de túnel vêm de `/dev/urandom`, então o relay só roda em Unix.
 
 **Hospedando numa VM** — 1 vCPU e 512 MB a 1 GB de RAM bastam; o que pesa é a banda (cada byte transferido entra e sai da VM), então escolha o provedor pela franquia de tráfego de saída. Abra uma única porta TCP (a 443 passa pela maioria das redes restritivas) mais o SSH, e rode sob systemd com [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (sem root, só `CAP_NET_BIND_SERVICE`). Configurar `net.ipv4.tcp_keepalive_time=60` ajuda a derrubar sessões mortas.
+
+**Contêiner** — o [`packaging/relay/Dockerfile`](packaging/relay/Dockerfile) gera uma imagem pequena, sem root, que escuta na 4443. Na raiz do repositório: `docker build -f packaging/relay/Dockerfile -t pdrop-relay .` e depois `docker run -d -p 4443:4443 pdrop-relay`. Os limites por IP precisam do endereço real do cliente: confira se a publicação da porta o preserva (no Docker Swarm, publique em modo `host`).
 
 ## Estrutura do projeto
 

@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fs::File,
     io::{self, Read, Write},
     net::{IpAddr, Shutdown, TcpListener, TcpStream},
     sync::{
@@ -12,9 +11,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_PER_IP: u32 = 32;
+/// conexões abertas somando todos os IPs
+const MAX_CONNS: u32 = 2048;
+/// por IP, uma cota para cada tipo: quem está na sala não gasta a vaga das transferências
+const MAX_NEW_PER_IP: u32 = 32;
+const MAX_CONTROL_PER_IP: u32 = 32;
+const MAX_TUNNEL_PER_IP: u32 = 32;
 const MAX_ROOM: usize = 32;
 const MAX_ROOMS: usize = 1024;
+/// salas diferentes ocupadas por um mesmo IP, para um só não tomar todas
+const MAX_ROOMS_PER_IP: usize = 8;
+/// entradas na tabela de limite por minuto
+const MAX_TRACKED: usize = 10_000;
+/// mensagens esperando um membro lento; além disso são descartadas
+const QUEUE: usize = 256;
 const MAX_RATE: u32 = 30;
 /// túneis têm cota própria: cada transferência gasta um DIAL e um ACCEPT
 const MAX_TUNNEL_RATE: u32 = 120;
@@ -26,24 +36,27 @@ const PAIR: Duration = Duration::from_secs(10);
 const IDLE: u64 = 120;
 const POLL: Duration = Duration::from_secs(5);
 
-type Out = Arc<Mutex<TcpStream>>;
-
 struct Member {
-    out: Out,
+    /// fila de saída: quem repassa nunca espera um destinatário lento
+    tx: mpsc::SyncSender<String>,
+    sock: Arc<TcpStream>,
+    /// só quem conhece a chave pode tomar o lugar deste uid
+    key: u128,
+    ip: IpAddr,
     epoch: u64,
 }
 
 struct Pending {
     room: String,
     uid: u128,
-    tx: mpsc::Sender<TcpStream>,
+    tx: mpsc::Sender<(TcpStream, Slot)>,
 }
 
 #[derive(Default)]
 pub struct State {
     rooms: Mutex<HashMap<String, HashMap<u128, Member>>>,
     pending: Mutex<HashMap<u128, Pending>>,
-    conns: Mutex<HashMap<IpAddr, u32>>,
+    conns: Mutex<HashMap<(IpAddr, Kind), u32>>,
     rate: Mutex<HashMap<(IpAddr, bool), (Instant, u32)>>,
     epoch: AtomicU64,
 }
@@ -51,10 +64,14 @@ pub struct State {
 impl State {
     fn allow(&self, ip: IpAddr, tunnel: bool) -> bool {
         let mut r = self.rate.lock().unwrap();
-        if r.len() > 10_000 {
+        let key = (ip, tunnel);
+        if r.len() >= MAX_TRACKED && !r.contains_key(&key) {
             r.retain(|_, (t, _)| t.elapsed() < WINDOW);
+            if r.len() >= MAX_TRACKED {
+                return false;
+            }
         }
-        let e = r.entry((ip, tunnel)).or_insert((Instant::now(), 0));
+        let e = r.entry(key).or_insert((Instant::now(), 0));
         if e.0.elapsed() >= WINDOW {
             *e = (Instant::now(), 0);
         }
@@ -63,16 +80,75 @@ impl State {
     }
 }
 
-struct Slot(Arc<State>, IpAddr);
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    /// ainda não mandou a primeira linha
+    New,
+    Control,
+    Tunnel,
+}
+
+impl Kind {
+    fn max_per_ip(self) -> u32 {
+        match self {
+            Kind::New => MAX_NEW_PER_IP,
+            Kind::Control => MAX_CONTROL_PER_IP,
+            Kind::Tunnel => MAX_TUNNEL_PER_IP,
+        }
+    }
+}
+
+/// vaga ocupada por uma conexão, devolvida quando ela termina
+struct Slot {
+    st: Arc<State>,
+    ip: IpAddr,
+    kind: Kind,
+}
+
+impl Slot {
+    fn open(st: &Arc<State>, ip: IpAddr) -> Option<Slot> {
+        let mut c = st.conns.lock().unwrap();
+        if c.values().sum::<u32>() >= MAX_CONNS {
+            return None;
+        }
+        let n = c.entry((ip, Kind::New)).or_insert(0);
+        if *n >= Kind::New.max_per_ip() {
+            return None;
+        }
+        *n += 1;
+        Some(Slot {
+            st: st.clone(),
+            ip,
+            kind: Kind::New,
+        })
+    }
+
+    /// passa a conexão para a cota do seu tipo
+    fn become_kind(&mut self, kind: Kind) -> bool {
+        let mut c = self.st.conns.lock().unwrap();
+        let n = c.entry((self.ip, kind)).or_insert(0);
+        if *n >= kind.max_per_ip() {
+            return false;
+        }
+        *n += 1;
+        release(&mut c, (self.ip, self.kind));
+        self.kind = kind;
+        true
+    }
+}
+
+fn release(c: &mut HashMap<(IpAddr, Kind), u32>, key: (IpAddr, Kind)) {
+    if let Some(n) = c.get_mut(&key) {
+        *n -= 1;
+        if *n == 0 {
+            c.remove(&key);
+        }
+    }
+}
+
 impl Drop for Slot {
     fn drop(&mut self) {
-        let mut c = self.0.conns.lock().unwrap();
-        if let Some(n) = c.get_mut(&self.1) {
-            *n -= 1;
-            if *n == 0 {
-                c.remove(&self.1);
-            }
-        }
+        release(&mut self.st.conns.lock().unwrap(), (self.ip, self.kind));
     }
 }
 
@@ -115,91 +191,161 @@ fn hex(s: &str) -> io::Result<u128> {
 
 fn token() -> io::Result<u128> {
     let mut b = [0u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut b)?;
+    random(&mut b)?;
     Ok(u128::from_ne_bytes(b))
 }
 
-fn broadcast(st: &State, room: &str, except: u128, msg: &str) {
-    let outs: Vec<Out> = st
-        .rooms
-        .lock()
-        .unwrap()
-        .get(room)
-        .map(|r| {
-            r.iter()
-                .filter(|(u, _)| **u != except)
-                .map(|(_, m)| m.out.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    for o in outs {
-        let _ = o.lock().unwrap().write_all(msg.as_bytes());
+#[cfg(unix)]
+fn random(b: &mut [u8]) -> io::Result<()> {
+    std::fs::File::open("/dev/urandom")?.read_exact(b)
+}
+
+// FFI direto para o relay continuar só com a biblioteca padrão
+#[cfg(windows)]
+fn random(b: &mut [u8]) -> io::Result<()> {
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        fn BCryptGenRandom(
+            algorithm: *mut std::ffi::c_void,
+            buffer: *mut u8,
+            len: u32,
+            flags: u32,
+        ) -> i32;
+    }
+    const USE_SYSTEM_PREFERRED_RNG: u32 = 2;
+    // SAFETY: `b` é um buffer válido de `b.len()` bytes, e com essa flag o algoritmo é nulo
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            b.as_mut_ptr(),
+            b.len() as u32,
+            USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other("sem fonte de aleatoriedade"))
     }
 }
 
-fn hello(st: &State, mut s: TcpStream, room: String, uid: u128) -> io::Result<()> {
-    let out: Out = Arc::new(Mutex::new(s.try_clone()?));
+/// manda `msg` aos outros membros da sala. Devolve false se `(uid, epoch)` já não é o membro atual
+fn broadcast(st: &State, room: &str, uid: u128, epoch: u64, msg: &str) -> bool {
+    let rooms = st.rooms.lock().unwrap();
+    let Some(r) = rooms.get(room) else {
+        return false;
+    };
+    if r.get(&uid).is_none_or(|m| m.epoch != epoch) {
+        return false;
+    }
+    for (_, m) in r.iter().filter(|(u, _)| **u != uid) {
+        let _ = m.tx.try_send(msg.into());
+    }
+    true
+}
+
+/// thread que escreve na conexão de controle; se a escrita falhar, derruba a conexão inteira,
+/// para não sobrar uma linha cortada ao meio
+fn writer(sock: Arc<TcpStream>) -> io::Result<mpsc::SyncSender<String>> {
+    let (tx, rx) = mpsc::sync_channel::<String>(QUEUE);
+    thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            for msg in rx {
+                if (&*sock).write_all(msg.as_bytes()).is_err() {
+                    let _ = sock.shutdown(Shutdown::Both);
+                    break;
+                }
+            }
+        })?;
+    Ok(tx)
+}
+
+/// o IP já ocupa o máximo de salas e `room` seria mais uma
+fn too_many_rooms(rooms: &HashMap<String, HashMap<u128, Member>>, ip: IpAddr, room: &str) -> bool {
+    let mine = |r: &HashMap<u128, Member>| r.values().any(|m| m.ip == ip);
+    !rooms.get(room).is_some_and(mine)
+        && rooms.values().filter(|r| mine(r)).count() >= MAX_ROOMS_PER_IP
+}
+
+fn hello(
+    st: &State,
+    mut s: TcpStream,
+    ip: IpAddr,
+    room: String,
+    uid: u128,
+    key: u128,
+) -> io::Result<()> {
+    let sock = Arc::new(s.try_clone()?);
+    let tx = writer(sock.clone())?;
     let epoch = st.epoch.fetch_add(1, Ordering::Relaxed);
-    let welcome = {
-        let mut guard = out.lock().unwrap();
+    {
         let mut rooms = st.rooms.lock().unwrap();
         if !rooms.contains_key(&room) && rooms.len() >= MAX_ROOMS {
             return Err(bad("relay cheio"));
         }
-        let r = rooms.entry(room.clone()).or_default();
-        if r.len() >= MAX_ROOM && !r.contains_key(&uid) {
-            return Err(bad("sala cheia"));
+        if too_many_rooms(&rooms, ip, &room) {
+            return Err(bad("salas demais para este IP"));
         }
-        r.insert(
-            uid,
-            Member {
-                out: out.clone(),
-                epoch,
-            },
-        );
-        drop(rooms);
-        guard.write_all(b"OK\n")
-    };
-    // mesmo se o OK falhar, a saída passa pela limpeza abaixo
-    let res = welcome.and_then(|()| {
-        loop {
-            let l = read_line(&mut s)?;
-            if let Some(t) = l.strip_prefix("BEACON ") {
-                broadcast(st, &room, uid, &format!("BEACON {uid:x} {t}\n"));
+        if let Some(r) = rooms.get(&room) {
+            match r.get(&uid) {
+                Some(old) if old.key != key => return Err(bad("uid em uso")),
+                None if r.len() >= MAX_ROOM => return Err(bad("sala cheia")),
+                _ => {}
             }
         }
-    });
-    let gone = {
-        let mut rooms = st.rooms.lock().unwrap();
-        let r = rooms.get_mut(&room);
-        let mine = r
-            .as_ref()
-            .is_some_and(|r| r.get(&uid).is_some_and(|m| m.epoch == epoch));
-        if let Some(r) = r {
-            if mine {
-                r.remove(&uid);
-            }
-            if r.is_empty() {
-                rooms.remove(&room);
-            }
+        // entra na fila antes de aparecer na sala: nada pode chegar antes do OK
+        tx.try_send("OK\n".into())
+            .map_err(|_| bad("conexão fechada"))?;
+        let member = Member {
+            tx,
+            sock,
+            key,
+            ip,
+            epoch,
+        };
+        if let Some(old) = rooms.entry(room.clone()).or_default().insert(uid, member) {
+            let _ = old.sock.shutdown(Shutdown::Both);
         }
-        mine
-    };
-    if gone {
-        broadcast(st, &room, uid, &format!("GONE {uid:x}\n"));
     }
+    // qualquer erro daqui em diante, inclusive no envio do OK, passa pela limpeza abaixo
+    let res: io::Result<()> = loop {
+        match read_line(&mut s) {
+            Ok(l) => {
+                if let Some(t) = l.strip_prefix("BEACON ")
+                    && !broadcast(st, &room, uid, epoch, &format!("BEACON {uid:x} {t}\n"))
+                {
+                    break Err(bad("substituído"));
+                }
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    let mut rooms = st.rooms.lock().unwrap();
+    if let Some(r) = rooms.get_mut(&room) {
+        if r.get(&uid).is_some_and(|m| m.epoch == epoch) {
+            r.remove(&uid);
+            for m in r.values() {
+                let _ = m.tx.try_send(format!("GONE {uid:x}\n"));
+            }
+        }
+        if r.is_empty() {
+            rooms.remove(&room);
+        }
+    }
+    drop(rooms);
     res
 }
 
 fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()> {
-    let out = st
+    let member = st
         .rooms
         .lock()
         .unwrap()
         .get(room)
         .and_then(|r| r.get(&target))
-        .map(|m| m.out.clone());
-    let Some(out) = out else {
+        .map(|m| m.tx.clone());
+    let Some(member) = member else {
         return s.write_all(b"ERR\n");
     };
     let tok = token()?;
@@ -212,13 +358,13 @@ fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()
             tx,
         },
     );
-    let sent = out
-        .lock()
-        .unwrap()
-        .write_all(format!("INCOMING {tok:x}\n").as_bytes());
+    let sent = member.try_send(format!("INCOMING {tok:x}\n"));
+    // não segura a fila do alvo enquanto espera
+    drop(member);
     let other = sent.ok().and_then(|_| rx.recv_timeout(PAIR).ok());
     st.pending.lock().unwrap().remove(&tok);
-    let Some(mut b) = other else {
+    // a vaga do ACCEPT dura enquanto o túnel durar
+    let Some((mut b, _slot)) = other else {
         return s.write_all(b"ERR\n");
     };
     b.write_all(b"OK\n")?;
@@ -226,15 +372,25 @@ fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()
     splice(s, b)
 }
 
-fn accept(st: &State, s: TcpStream, room: &str, uid: u128, tok: u128) -> io::Result<()> {
-    let p = st.pending.lock().unwrap().remove(&tok);
-    match p {
-        Some(p) if p.room == room && p.uid == uid => {
-            let _ = p.tx.send(s);
-            Ok(())
+fn accept(
+    st: &State,
+    s: TcpStream,
+    slot: Slot,
+    room: &str,
+    uid: u128,
+    tok: u128,
+) -> io::Result<()> {
+    let p = {
+        let mut pending = st.pending.lock().unwrap();
+        // um pedido errado não pode gastar o token do alvo verdadeiro
+        match pending.get(&tok) {
+            Some(p) if p.room == room && p.uid == uid => pending.remove(&tok),
+            _ => None,
         }
-        _ => Err(bad("token")),
-    }
+    };
+    let p = p.ok_or_else(|| bad("token"))?;
+    let _ = p.tx.send((s, slot));
+    Ok(())
 }
 
 fn splice(a: TcpStream, b: TcpStream) -> io::Result<()> {
@@ -284,20 +440,25 @@ fn pump(mut from: TcpStream, mut to: TcpStream, t0: Instant, last: &AtomicU64) {
     let _ = to.shutdown(Shutdown::Write);
 }
 
-fn handle(st: &State, mut s: TcpStream, ip: IpAddr) -> io::Result<()> {
+fn handle(st: &State, mut s: TcpStream, mut slot: Slot) -> io::Result<()> {
     s.set_read_timeout(Some(WAIT))?;
     s.set_write_timeout(Some(WRITE))?;
     s.set_nodelay(true)?;
     let line = read_line(&mut s)?;
     // linhas inválidas caem na cota menor
     let tunnel = line.starts_with("DIAL ") || line.starts_with("ACCEPT ");
+    let ip = slot.ip;
     if !st.allow(ip, tunnel) {
         return Err(bad("rate"));
     }
+    let kind = if tunnel { Kind::Tunnel } else { Kind::Control };
+    if !slot.become_kind(kind) {
+        return Err(bad("conexões demais"));
+    }
     match line.split(' ').collect::<Vec<_>>()[..] {
-        ["HELLO", room, uid] => hello(st, s, room_id(room)?, hex(uid)?),
+        ["HELLO", room, uid, key] => hello(st, s, ip, room_id(room)?, hex(uid)?, hex(key)?),
         ["DIAL", room, uid] => dial(st, s, &room_id(room)?, hex(uid)?),
-        ["ACCEPT", room, uid, tok] => accept(st, s, &room_id(room)?, hex(uid)?, hex(tok)?),
+        ["ACCEPT", room, uid, tok] => accept(st, s, slot, &room_id(room)?, hex(uid)?, hex(tok)?),
         _ => Err(bad("comando")),
     }
 }
@@ -307,20 +468,14 @@ pub fn serve(l: TcpListener, st: Arc<State>) {
         let Ok(ip) = s.peer_addr().map(|a| a.ip()) else {
             continue;
         };
-        {
-            let mut c = st.conns.lock().unwrap();
-            let n = c.entry(ip).or_insert(0);
-            if *n >= MAX_PER_IP {
-                continue;
-            }
-            *n += 1;
-        }
-        let (slot, st) = (Slot(st.clone(), ip), st.clone());
+        let Some(slot) = Slot::open(&st, ip) else {
+            continue;
+        };
+        let st = st.clone();
         let _ = thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(move || {
-                let _slot = slot;
-                let _ = handle(&st, s, ip);
+                let _ = handle(&st, s, slot);
             });
     }
 }
@@ -368,14 +523,121 @@ mod tests {
     fn failed_welcome_leaves_no_ghost_member() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let _client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
-        let (s, _) = l.accept().unwrap();
-        s.shutdown(Shutdown::Write).unwrap(); // o envio do OK vai falhar
+        let (s, ip) = l.accept().unwrap();
+        // o envio do OK vai falhar; o prazo evita travar onde o shutdown não acorda a leitura
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        s.shutdown(Shutdown::Write).unwrap();
         let st = State::default();
-        assert!(hello(&st, s, "a".repeat(64), 1).is_err());
+        assert!(hello(&st, s, ip.ip(), "a".repeat(64), 1, 1).is_err());
         assert!(
             st.rooms.lock().unwrap().is_empty(),
             "sobrou membro fantasma"
         );
+    }
+
+    fn start() -> (std::net::SocketAddr, Arc<State>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let st = Arc::new(State::default());
+        let st2 = st.clone();
+        thread::spawn(move || serve(l, st2));
+        (addr, st)
+    }
+
+    /// o servidor fechou a conexão sem responder
+    fn refused(mut s: TcpStream) -> bool {
+        read_line(&mut s).is_err()
+    }
+
+    #[test]
+    fn a_uid_is_only_replaced_with_its_key() {
+        let (addr, _) = start();
+        let room = "a".repeat(64);
+        let join = |uid, key| conn(addr, &format!("HELLO {room} {uid} {key}"));
+        let mut watcher = join(9, 9);
+        assert_eq!(read_line(&mut watcher).unwrap(), "OK");
+        let mut old = join(1, 111);
+        assert_eq!(read_line(&mut old).unwrap(), "OK");
+
+        assert!(refused(join(1, 222)), "outra chave não toma o uid");
+        writeln!(old, "BEACON sigo aqui").unwrap();
+        assert_eq!(read_line(&mut watcher).unwrap(), "BEACON 1 sigo aqui");
+
+        let mut new = join(1, 111);
+        assert_eq!(read_line(&mut new).unwrap(), "OK");
+        assert!(refused(old), "a sessão substituída é fechada");
+        writeln!(new, "BEACON voltei").unwrap();
+        // sem GONE no meio: o uid nunca saiu da sala
+        assert_eq!(read_line(&mut watcher).unwrap(), "BEACON 1 voltei");
+    }
+
+    #[test]
+    fn a_wrong_accept_keeps_the_token() {
+        let (addr, _) = start();
+        let room = "a".repeat(64);
+        let mut b = conn(addr, &format!("HELLO {room} 2 2"));
+        assert_eq!(read_line(&mut b).unwrap(), "OK");
+        let mut d = conn(addr, &format!("DIAL {room} 2"));
+        let line = read_line(&mut b).unwrap();
+        let tok = line.strip_prefix("INCOMING ").unwrap();
+        assert!(refused(conn(addr, &format!("ACCEPT {room} 3 {tok}"))));
+        let mut e = conn(addr, &format!("ACCEPT {room} 2 {tok}"));
+        assert_eq!(read_line(&mut d).unwrap(), "OK");
+        assert_eq!(read_line(&mut e).unwrap(), "OK");
+    }
+
+    #[test]
+    fn connection_slots_are_limited() {
+        let st = Arc::new(State::default());
+        let ip = |n: u32| IpAddr::from(n.to_be_bytes());
+        let mut held = vec![];
+        // quem está nas salas não gasta a vaga dos túneis
+        for kind in [Kind::Control, Kind::Tunnel] {
+            for _ in 0..kind.max_per_ip() {
+                let mut s = Slot::open(&st, ip(1)).unwrap();
+                assert!(s.become_kind(kind));
+                held.push(s);
+            }
+            assert!(!Slot::open(&st, ip(1)).unwrap().become_kind(kind));
+        }
+        // o total vale mesmo com cada conexão vindo de um IP
+        let mut n = 2;
+        while let Some(s) = Slot::open(&st, ip(n)) {
+            held.push(s);
+            n += 1;
+        }
+        assert_eq!(held.len() as u32, MAX_CONNS);
+        held.clear();
+        assert!(st.conns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_ip_cannot_take_every_room() {
+        let (addr, _) = start();
+        let join = |n: usize, uid| conn(addr, &format!("HELLO {n:064x} {uid} 1"));
+        let mut held = vec![];
+        for n in 0..MAX_ROOMS_PER_IP {
+            let mut s = join(n, 1);
+            assert_eq!(read_line(&mut s).unwrap(), "OK");
+            held.push(s);
+        }
+        assert!(refused(join(MAX_ROOMS_PER_IP, 1)));
+        // numa sala em que já está, o IP continua podendo entrar
+        assert_eq!(read_line(&mut join(0, 2)).unwrap(), "OK");
+    }
+
+    #[test]
+    fn rate_table_has_a_ceiling() {
+        let st = State::default();
+        for n in 0..MAX_TRACKED as u32 {
+            assert!(st.allow(IpAddr::from(n.to_be_bytes()), false));
+        }
+        assert!(!st.allow(IpAddr::from([255, 0, 0, 1]), false));
+        assert!(
+            st.allow(IpAddr::from([0, 0, 0, 0]), false),
+            "quem já está segue"
+        );
+        assert_eq!(st.rate.lock().unwrap().len(), MAX_TRACKED);
     }
 
     #[test]
@@ -385,9 +647,9 @@ mod tests {
         thread::spawn(move || serve(l, Arc::new(State::default())));
         let (ra, rb) = ("a".repeat(64), "b".repeat(64));
 
-        let mut a = conn(addr, &format!("HELLO {ra} 1"));
-        let mut b = conn(addr, &format!("HELLO {ra} 2"));
-        let mut c = conn(addr, &format!("HELLO {rb} 3"));
+        let mut a = conn(addr, &format!("HELLO {ra} 1 1"));
+        let mut b = conn(addr, &format!("HELLO {ra} 2 2"));
+        let mut c = conn(addr, &format!("HELLO {rb} 3 3"));
         for s in [&mut a, &mut b, &mut c] {
             assert_eq!(read_line(s).unwrap(), "OK");
         }

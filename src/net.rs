@@ -63,6 +63,8 @@ pub struct Peer {
     pub id: u64,
     pub name: String,
     pub route: Route,
+    /// relay que também alcança um aparelho da LAN, para quando a conexão direta falhar
+    pub fallback: Option<Arc<relay::Config>>,
     pub seen: Instant,
     pub born: Instant,
     pub rtt: Option<f64>,
@@ -282,6 +284,7 @@ pub fn upsert(
                 id,
                 name,
                 route,
+                fallback: None,
                 seen: now,
                 born: now,
                 rtt: None,
@@ -292,12 +295,23 @@ pub fn upsert(
         return lan;
     };
     let was_lan = matches!(p.route, Route::Lan(_));
-    // o relay não troca a identidade de quem já está no radar, nem tira uma rota LAN ativa
-    if !lan && (p.uid != uid || (was_lan && now.duration_since(p.seen) < LAN_FRESH)) {
+    // o relay não troca a identidade de quem já está no radar
+    if !lan && p.uid != uid {
         return false;
     }
-    if !lan {
-        p.rtt = None;
+    match &route {
+        // nem tira uma rota LAN ativa: só fica guardado como alternativa
+        Route::Relay(cfg) if was_lan && now.duration_since(p.seen) < LAN_FRESH => {
+            p.fallback = Some(cfg.clone());
+            return false;
+        }
+        Route::Relay(_) => (p.rtt, p.fallback) = (None, None),
+        Route::Lan(_) if p.uid != uid => p.fallback = None,
+        Route::Lan(_) => {
+            if let Route::Relay(cfg) = &p.route {
+                p.fallback = Some(cfg.clone());
+            }
+        }
     }
     (p.name, p.route, p.seen, p.color, p.uid) = (name, route, now, color, uid);
     lan && !was_lan
@@ -1012,18 +1026,26 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
 }
 
 fn connect(to: &Peer) -> io::Result<TcpStream> {
-    match &to.route {
-        Route::Lan(addr) => TcpStream::connect_timeout(addr, Duration::from_secs(5)).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"
-                ),
-            )
-        }),
-        Route::Relay(cfg) => relay::dial(cfg, to.uid)
-            .map_err(|e| io::Error::new(e.kind(), format!("não conectou pelo relay ({e})"))),
-    }
+    let via_relay = |cfg: &relay::Config| {
+        relay::dial(cfg, to.uid)
+            .map_err(|e| io::Error::new(e.kind(), format!("não conectou pelo relay ({e})")))
+    };
+    let addr = match &to.route {
+        Route::Lan(addr) => addr,
+        Route::Relay(cfg) => return via_relay(cfg),
+    };
+    TcpStream::connect_timeout(addr, Duration::from_secs(5)).or_else(|e| {
+        let lan = io::Error::new(
+            e.kind(),
+            format!("não conectou ({e}); confira o firewall dos dois lados (TCP {TRANSFER_PORT})"),
+        );
+        match &to.fallback {
+            Some(cfg) => {
+                via_relay(cfg).map_err(|r| io::Error::new(r.kind(), format!("{lan}; {r}")))
+            }
+            None => Err(lan),
+        }
+    })
 }
 
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
@@ -1139,6 +1161,7 @@ mod tests {
             id: 1,
             name: "t".into(),
             route: Route::Lan(([127, 0, 0, 1], port).into()),
+            fallback: None,
             seen: Instant::now(),
             born: Instant::now(),
             rtt: None,
@@ -1295,6 +1318,7 @@ mod tests {
         let soon = t0 + Duration::from_secs(1);
         put(relay(), 7, soon);
         assert!(is_lan());
+        assert!(peers.lock().unwrap()[&1].fallback.is_some());
         assert_eq!(peers.lock().unwrap()[&1].seen, t0);
         put(relay(), 8, t0 + LAN_FRESH);
         assert!(is_lan(), "outra identidade não assume");

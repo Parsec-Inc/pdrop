@@ -206,7 +206,7 @@ On the LAN everything is peer-to-peer, with no server. The optional [relay](#rel
 - Transfers are encrypted and authenticated end to end, over the LAN or the relay; beacons are not (on the LAN, anyone on the network can see name, color, icon and uid unless you use the visibility modes).
 - Anyone on the same network can see your pdrop beacon (name, color, icon) — that's how discovery works. Transfers are explicit and require the recipient's y/n, except text messages from peers you marked as trusted and bridge copies after a one-time grant (which you can cut with `x`).
 - **With a relay there is no TLS.** Whoever can watch the network between you and the relay, and whoever runs it, can read your IP, the room id and your beacons (name, color, icon, visibility, device ids). What you send, including file names and exact transfer headers, stays inside the encrypted channel, though the relay sees who connects to whom, when and how much.
-- **The room id is enough to join.** Someone who captures it does not need the secret: they can see the visible devices, send transfer requests (which still need your y/n), and disconnect a member by reusing its uid. They cannot pose as a trusted device or read your transfers. Names can be copied, so compare the pairing code before accepting from someone new. If the room may have leaked, switch every device to a new secret.
+- **The room id is enough to join.** Someone who captures it does not need the secret: they can see the visible devices, send transfer requests (which still need your y/n), and take a device's place in the room: by replaying its captured membership key, or by joining with its uid while it is offline. They cannot pose as a trusted device or read your transfers. Names can be copied, so compare the pairing code before accepting from someone new. If the room may have leaked, switch every device to a new secret.
 - Visibility modes are applied by the receiving app. On the relay, an *invisible* device sends no beacon but is still a room member, reachable by anyone who has the room id and its uid; with *trusted only*, beacons still reach the whole room.
 - The clipboard bridge sends **everything you copy** while it's on. Password managers usually bypass the system clipboard, but double-check before bridging on a shared network.
 - Incoming file names are sanitized (no paths, no control characters) and payloads are size-capped, but as with any LAN transfer tool, run it among people you trust.
@@ -246,29 +246,31 @@ echo relay.example.com:443 > ~/.config/pdrop/relay
 
 `--relay HOST:PORT` and `--room SECRET` work too: the window saves them to those files, while `pdrop send` uses them for that run only. `PDROP_RELAY` and `PDROP_ROOM` are also accepted and never saved. Each value is taken from the flag, then the variable, then the file. To turn the relay off, delete both files.
 
-An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN.
+An invalid flag stops pdrop; an invalid saved or environment value only disables the relay, with a warning. A device reachable both ways is used over the LAN; if the direct connection fails (a firewall, or Wi-Fi client isolation), the transfer goes through the relay.
 
 **Protocol** — one line per message, ending in `\n`:
 
 | Message | Meaning |
 |---------|---------|
-| `HELLO <room> <uid>` | Control connection. The relay answers `OK` (or closes). |
+| `HELLO <room> <uid> <key>` | Control connection. The relay answers `OK` (or closes). While a uid is in the room, only the same `key` (hex, up to 128 bits) can replace it; the app derives it from the device's private key and the room. |
 | `BEACON <text>` | Client → relay, every few seconds; forwarded to the room. The app uses 1.5 s and `<id>\|<color+icon>\|<visibility>\|<name>`. |
 | any other line, e.g. `PING` | Client → relay: ignored, but keeps the connection alive (used when invisible). Silence for more than 30 s drops the member. |
 | `BEACON <uid> <text>`, `GONE <uid>`, `INCOMING <token>` | Relay → client: presence of another member, a member left, someone wants to connect. |
 | `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
 | `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
 
-**Limits** — 32 connections per IP, 32 members per room, 1024 rooms, per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), 10 s for the target to accept, 120 s without traffic closes a tunnel. Room ids are never logged.
+**Limits** — 2048 connections in total; per IP, 32 control connections, 32 tunnel connections, 32 still waiting to send their first line, and 8 rooms; 32 members per room, 1024 rooms; per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), with at most 10,000 entries tracked; 10 s for the target to accept, 120 s without traffic closes a tunnel. Presence messages for a member that reads too slowly are dropped. Room ids are never logged.
 
 **Known shortcuts**
-- A repeated uid in a room replaces the old one (so reconnecting works). A member could kick another with a forged uid, but cannot hijack a transfer: the Noise handshake checks the uid.
-- Behind a shared NAT, users split the per-IP rate limit.
+- The relay cannot verify that a uid belongs to whoever joins with it. The membership key stops other members from replacing a connected device, but one that joins with an offline device's uid keeps it out until it leaves. Transfers cannot be hijacked: the Noise handshake checks the uid.
+- The room and per-IP limits only raise the cost of filling the relay; someone with many addresses still can. Anyone who can reach it can create rooms.
+- Behind a shared NAT, users split the per-IP limits.
 - No TLS between client and relay: content is already encrypted, but the room id and beacons travel in clear (see [Privacy](#privacy--safety-notes)).
 - Two windows with the same identity (same user on one machine) replace each other in the room. `pdrop send` avoids this by joining with a throwaway uid.
-- Tunnel tokens come from `/dev/urandom`, so the relay is Unix-only.
 
 **Hosting on a VM** — 1 vCPU and 512 MB–1 GB of RAM are enough; bandwidth is what matters (every transferred byte enters and leaves the VM), so pick the provider by its outbound traffic allowance. Open a single TCP port (443 passes most restrictive networks) plus SSH, and run it under systemd with [`packaging/relay/pdrop-relay.service`](packaging/relay/pdrop-relay.service) (unprivileged, `CAP_NET_BIND_SERVICE` only). Setting `net.ipv4.tcp_keepalive_time=60` helps drop dead sessions.
+
+**Container** — [`packaging/relay/Dockerfile`](packaging/relay/Dockerfile) builds a small non-root image listening on 4443. From the repository root: `docker build -f packaging/relay/Dockerfile -t pdrop-relay .`, then `docker run -d -p 4443:4443 pdrop-relay`. The per-IP limits need the real client address: check that your port publishing keeps it (in Docker Swarm, publish in `host` mode).
 
 ## Project layout
 

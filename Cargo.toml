@@ -32,6 +32,7 @@ lto = "thin"
 maintainer = "Parsec-Inc <noreply@github.com>"
 section = "net"
 priority = "optional"
+# a janela carrega wayland/x11/GL em runtime (dlopen), então não dá para deixar o $auto adivinhar
 depends = "libc6 (>= 2.31)"
 recommends = "wl-clipboard | xclip, libnotify-bin"
 extended-description = "Run pdrop on two or more machines on the same network and they appear on each other's radar. Select a peer and drop files, text or your clipboard to them. No accounts, no servers."

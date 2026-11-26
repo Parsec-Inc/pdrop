@@ -646,20 +646,36 @@ fn save_setting(k: &str, v: &str) {
     let _ = std::fs::create_dir_all(p.parent().unwrap()).and_then(|_| std::fs::write(p, v));
 }
 
-/// como o `save_setting`, mas o arquivo só pode ser lido pelo dono (no Unix)
-fn save_secret(k: &str, v: &str) -> std::io::Result<()> {
+/// troca o arquivo de uma vez: quem lê vê o conteúdo antigo ou o novo, nunca um pedaço,
+/// mesmo com duas janelas salvando juntas. Com `private`, só o dono lê (no Unix)
+fn replace_file(p: &std::path::Path, v: &str, private: bool) -> std::io::Result<()> {
     use std::io::Write;
-    let p = setting_path(k);
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::fs::create_dir_all(p.parent().unwrap())?;
-    let mut o = std::fs::OpenOptions::new();
-    o.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let mut f = o.open(&p)?;
-    // restringe antes de escrever, caso o arquivo já existisse mais aberto
-    owner_only(&p)?;
-    f.set_len(0)?;
-    f.write_all(v.as_bytes())
+    let tmp = p.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let write = || {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        }
+        let mut f = o.open(&tmp)?;
+        if private {
+            owner_only(&tmp)?;
+        }
+        f.write_all(v.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, p)
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn owner_only(_p: &std::path::Path) -> std::io::Result<()> {
@@ -706,11 +722,13 @@ impl RelayFlags {
 
     /// guarda o que veio por opção, para as próximas vezes
     fn save(&self) {
-        if let Some(a) = &self.addr {
-            save_setting("relay", a.trim());
+        if let Some(a) = &self.addr
+            && let Err(e) = replace_file(&setting_path("relay"), a.trim(), false)
+        {
+            eprintln!("não consegui salvar o endereço do relay: {e}");
         }
         if let Some(s) = &self.room
-            && let Err(e) = save_secret("sala", s.trim())
+            && let Err(e) = replace_file(&setting_path("sala"), s.trim(), true)
         {
             eprintln!("não consegui salvar o segredo da sala: {e}");
         }
@@ -1011,6 +1029,7 @@ fn cli_run(
         eprintln!("sem rede: {e}");
         return 1;
     }
+    let with_relay = relay.is_some();
     // com o relay a conexão pode demorar mais que a descoberta local
     let wait = Duration::from_secs(if relay.is_some() { 8 } else { 6 });
     if let Some(cfg) = relay {
@@ -1048,8 +1067,12 @@ fn cli_run(
             .filter(|p| !(matches!(p.route, net::Route::Relay(_)) && p.uid == uid))
             .cloned()
             .collect();
-        let found = pick(&v)
-            .filter(|p| matches!(p.route, net::Route::Lan(_)) || start.elapsed() >= LAN_GRACE);
+        // com relay, vale esperar um pouco: pela LAN para preferi-la, e pelo relay para
+        // ter um segundo caminho caso a conexão direta esteja bloqueada
+        let found = pick(&v).filter(|p| {
+            start.elapsed() >= LAN_GRACE
+                || (!p.via_relay() && (!with_relay || p.fallback.is_some()))
+        });
         match (&to, v.as_slice()) {
             (Some(_), _) if found.is_some() => break found,
             (None, _) if Instant::now() >= deadline => match v.as_slice() {
@@ -1281,4 +1304,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn replace_file_swaps_the_whole_file() {
+        let dir = std::env::temp_dir().join(format!("pdrop-replace-{}", std::process::id()));
+        let p = dir.join("sala");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, "um segredo antigo bem mais comprido").unwrap();
+        super::replace_file(&p, "novo", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "novo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "sobrou temporário"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
