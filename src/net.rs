@@ -42,7 +42,6 @@ pub struct Who {
     pub key: [u8; 32],
 }
 
-/// como alcançar um aparelho
 #[derive(Clone)]
 pub enum Route {
     Lan(SocketAddr),
@@ -63,7 +62,6 @@ pub struct Peer {
     pub id: u64,
     pub name: String,
     pub route: Route,
-    /// relay que também alcança um aparelho da LAN, para quando a conexão direta falhar
     pub fallback: Option<Arc<relay::Config>>,
     pub seen: Instant,
     pub born: Instant,
@@ -261,11 +259,8 @@ pub fn discover(
     Ok(())
 }
 
-/// sem beacon da LAN por esse tempo, o relay assume a rota; precisa ser menor que o prazo do radar (6 s)
 const LAN_FRESH: Duration = Duration::from_secs(4);
 
-/// registra um beacon vindo de qualquer um dos caminhos; a LAN tem prioridade sobre o relay.
-/// Devolve true quando o aparelho passou a ser alcançável pela LAN.
 pub fn upsert(
     peers: &Peers,
     id: u64,
@@ -295,12 +290,10 @@ pub fn upsert(
         return lan;
     };
     let was_lan = matches!(p.route, Route::Lan(_));
-    // o relay não troca a identidade de quem já está no radar
     if !lan && p.uid != uid {
         return false;
     }
     match &route {
-        // nem tira uma rota LAN ativa: só fica guardado como alternativa
         Route::Relay(cfg) if was_lan && now.duration_since(p.seen) < LAN_FRESH => {
             p.fallback = Some(cfg.clone());
             return false;
@@ -1025,8 +1018,6 @@ fn walk(p: &Path, rel: String, out: &mut Vec<Entry>) -> io::Result<()> {
     Ok(())
 }
 
-/// canal cifrado com o aparelho certo. Pela LAN, uma falha na conexão, no handshake ou na
-/// identidade passa a vez ao relay, que exige a mesma identidade
 fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
     let verify = |tcp: TcpStream| {
         tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -1037,7 +1028,6 @@ fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
                 "a identidade desse aparelho mudou ou não confere: recusei por segurança",
             ));
         }
-        // daqui em diante a resposta depende de alguém aceitar
         s.tcp().set_read_timeout(Some(Duration::from_secs(60)))?;
         Ok(s)
     };

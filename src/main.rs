@@ -47,7 +47,6 @@ pub struct App {
     pub focus: bool,
     pub firewall: firewall::Shared,
     pub relay: relays::Control,
-    /// tela dos relays, quando aberta
     pub relay_ui: Option<ui::RelayPanel>,
     pub uid: u128,
     pub policy: Arc<Policy>,
@@ -653,8 +652,6 @@ fn save_setting(k: &str, v: &str) {
     let _ = std::fs::create_dir_all(p.parent().unwrap()).and_then(|_| std::fs::write(p, v));
 }
 
-/// troca o arquivo de uma vez: quem lê vê o conteúdo antigo ou o novo, nunca um pedaço,
-/// mesmo com duas janelas salvando juntas. Com `private`, só o dono lê (no Unix)
 fn replace_file(p: &std::path::Path, v: &str, private: bool) -> std::io::Result<()> {
     use std::io::Write;
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -957,8 +954,6 @@ fn usage() -> i32 {
     2
 }
 
-/// quem reabre o app muda de id de sessão e a entrada antiga continua aqui: fica a mais recente
-/// de cada identidade
 fn one_per_device(mut v: Vec<Peer>) -> Vec<Peer> {
     v.sort_by_key(|p| std::cmp::Reverse(p.seen));
     let mut seen = std::collections::HashSet::new();
@@ -966,7 +961,6 @@ fn one_per_device(mut v: Vec<Peer>) -> Vec<Peer> {
     v
 }
 
-/// tempo para um aparelho achado pelo relay também aparecer na LAN, que é o caminho preferido
 const LAN_GRACE: Duration = Duration::from_secs(3);
 
 fn cli_run(
@@ -1000,11 +994,8 @@ fn cli_run(
         return 1;
     }
     let with_relay = relay.is_some();
-    // com o relay a conexão pode demorar mais que a descoberta local
     let wait = Duration::from_secs(if relay.is_some() { 8 } else { 6 });
     if let Some(cfg) = relay {
-        // entra na sala com um uid descartável: o relay troca membros de uid repetido, e usar o
-        // nosso tiraria da sala a janela aberta nesta máquina. A transferência usa a chave real.
         relay::watch(
             cfg,
             relay::Me {
@@ -1029,7 +1020,6 @@ fn cli_run(
     let deadline = start + wait;
     let target = loop {
         std::thread::sleep(Duration::from_millis(200));
-        // pelo relay, a janela desta máquina aparece como outro aparelho: não é um destino
         let v: Vec<Peer> = peers
             .lock()
             .unwrap()
@@ -1038,8 +1028,6 @@ fn cli_run(
             .cloned()
             .collect();
         let v = one_per_device(v);
-        // com relay, vale esperar um pouco: pela LAN para preferi-la, e pelo relay para
-        // ter um segundo caminho caso a conexão direta esteja bloqueada
         let found = pick(&v).filter(|p| {
             start.elapsed() >= LAN_GRACE
                 || (!p.via_relay() && (!with_relay || p.fallback.is_some()))

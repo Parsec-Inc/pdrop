@@ -1,5 +1,3 @@
-//! os relays salvos, qual deles está em uso e a conexão com ele
-
 use crate::{net, relay};
 use std::{
     io,
@@ -7,9 +5,7 @@ use std::{
 };
 
 pub const NAME_MAX: usize = 32;
-/// guarda as senhas: só o dono lê
 const FILE: &str = "relays";
-/// formato anterior, de um relay só: um arquivo para o endereço e outro para o segredo
 const OLD_ADDR: &str = "relay";
 const OLD_SECRET: &str = "sala";
 
@@ -21,7 +17,6 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// confere os campos; sem nome, usa o do servidor
     pub fn new(name: &str, addr: &str, secret: &str) -> Result<Self, String> {
         let (addr, secret) = (addr.trim(), secret.trim());
         if addr.is_empty() {
@@ -63,7 +58,6 @@ impl Book {
         self.list.get(self.active?)
     }
 
-    /// uma linha por relay: `*` (o ativo) ou `-`, nome, servidor e senha, separados por tabulação
     fn parse(text: &str) -> Result<Self, String> {
         let mut book = Self::default();
         for (n, line) in text.lines().enumerate() {
@@ -95,7 +89,6 @@ impl Book {
             .collect()
     }
 
-    /// grava no lugar de `at`, ou no fim; nomes repetidos ganham um número. Devolve a posição
     fn put(&mut self, at: Option<usize>, mut p: Profile) -> usize {
         let at = at.filter(|i| *i < self.list.len());
         let taken = |name: &str| {
@@ -139,7 +132,6 @@ impl Book {
         };
     }
 
-    /// ativa o relay com este servidor e esta senha, salvando um novo se não houver
     fn adopt(&mut self, p: Profile) {
         let found = self
             .list
@@ -149,15 +141,11 @@ impl Book {
     }
 }
 
-/// o que está no disco
 #[derive(Default)]
 pub struct Saved {
     pub book: Book,
-    /// o arquivo existe mas não deu para ler: nada é gravado por cima dele
     broken: Option<String>,
-    /// arquivos do formato anterior que não formam um relay válido, para o aviso sair igual
     old: (Option<String>, Option<String>),
-    /// o `book` veio do formato anterior e ainda não foi gravado
     migrate: bool,
 }
 
@@ -207,14 +195,12 @@ pub fn load(dir: &Path) -> Saved {
 
 fn store(dir: &Path, book: &Book) -> io::Result<()> {
     crate::replace_file(&dir.join(FILE), &book.render(), true)?;
-    // o formato novo já vale: não deixa uma cópia da senha para trás
     for old in [OLD_ADDR, OLD_SECRET] {
         let _ = std::fs::remove_file(dir.join(old));
     }
     Ok(())
 }
 
-/// `--relay` e `--room`
 #[derive(Default)]
 pub struct Flags {
     pub addr: Option<String>,
@@ -227,7 +213,6 @@ impl Flags {
     }
 }
 
-/// `PDROP_RELAY` e `PDROP_ROOM`
 #[derive(Default)]
 pub struct Env {
     pub addr: Option<String>,
@@ -248,7 +233,6 @@ impl Env {
     }
 }
 
-/// servidor e senha vindos do que está salvo
 fn saved_pair(saved: &Saved) -> (Option<String>, Option<String>) {
     match saved.book.current() {
         Some(p) => (Some(p.addr.clone()), Some(p.secret.clone())),
@@ -256,11 +240,8 @@ fn saved_pair(saved: &Saved) -> (Option<String>, Option<String>) {
     }
 }
 
-/// a configuração desta execução e, se o relay ficou desligado por um erro, o motivo
 pub type Resolved = (Option<relay::Config>, Option<String>);
 
-/// cada valor vem da opção, senão da variável de ambiente, senão do relay salvo em uso.
-/// Erro só interrompe quando uma opção foi passada: config salva quebrada não impede a LAN
 pub fn resolve(flags: &Flags, env: &Env, saved: &Saved) -> Result<Resolved, String> {
     let (addr, secret) = saved_pair(saved);
     let addr = flags.addr.clone().or_else(|| env.addr.clone()).or(addr);
@@ -279,8 +260,6 @@ pub fn resolve(flags: &Flags, env: &Env, saved: &Saved) -> Result<Resolved, Stri
     }
 }
 
-/// a janela guarda o que veio por opção, como o relay em uso, e converte o formato anterior.
-/// O que vem das variáveis de ambiente nunca é salvo
 pub fn remember(dir: &Path, flags: &Flags, saved: &mut Saved) -> Result<(), String> {
     if let Some(e) = &saved.broken {
         return if flags.any() {
@@ -293,7 +272,6 @@ pub fn remember(dir: &Path, flags: &Flags, saved: &mut Saved) -> Result<(), Stri
     if flags.any() {
         let (addr, secret) = saved_pair(saved);
         let (addr, secret) = (flags.addr.clone().or(addr), flags.room.clone().or(secret));
-        // com a outra metade só na variável de ambiente, não há o que salvar
         if let (Some(a), Some(s)) = (addr, secret) {
             book.adopt(Profile::new("", &a, &s)?);
         }
@@ -305,7 +283,6 @@ pub fn remember(dir: &Path, flags: &Flags, saved: &mut Saved) -> Result<(), Stri
     Ok(())
 }
 
-/// o que a janela usa para trocar de relay com o app aberto
 pub struct Control {
     dir: PathBuf,
     saved: Saved,
@@ -313,9 +290,7 @@ pub struct Control {
     peers: net::Peers,
     incoming: relay::Incoming,
     handle: Option<relay::Handle>,
-    /// servidor e sala da conexão atual
     running: Option<(String, String)>,
-    /// por que o relay está desligado, quando é por um erro
     off: Option<String>,
 }
 
@@ -348,7 +323,6 @@ impl Control {
         &self.saved.book
     }
 
-    /// como anda a conexão; `None` com o relay desligado de propósito
     pub fn link(&self) -> Option<relay::Link> {
         match &self.handle {
             Some(h) => Some(h.status.lock().unwrap().clone()),
@@ -356,7 +330,6 @@ impl Control {
         }
     }
 
-    /// o relay salvo que está em uso agora
     pub fn in_use(&self) -> Option<usize> {
         let running = self.running.as_ref()?;
         self.saved
@@ -366,7 +339,6 @@ impl Control {
             .and(self.saved.book.active)
     }
 
-    /// há uma conexão que não é de nenhum relay salvo (veio de variável de ambiente)
     pub fn external(&self) -> bool {
         self.running.is_some() && self.in_use().is_none()
     }
@@ -386,7 +358,6 @@ impl Control {
         });
     }
 
-    /// grava a mudança; a conexão só muda depois de gravada
     fn change(&mut self, edit: impl FnOnce(&mut Book)) -> Result<(), String> {
         if let Some(e) = &self.saved.broken {
             return Err(format!("corrija ou apague o arquivo antes: {e}"));
@@ -408,7 +379,6 @@ impl Control {
         self.connect(cfg);
     }
 
-    /// passa a usar um relay salvo, ou nenhum
     pub fn activate(&mut self, i: Option<usize>) -> Result<(), String> {
         self.change(|b| b.active = i.filter(|i| *i < b.list.len()))?;
         if i.is_none() || self.in_use() != i {
@@ -417,7 +387,6 @@ impl Control {
         Ok(())
     }
 
-    /// um relay novo já entra em uso; editar o que está em uso reconecta
     pub fn save(&mut self, at: Option<usize>, p: Profile) -> Result<(), String> {
         let before = self.saved.book.current().cloned();
         self.change(|b| {
@@ -435,7 +404,6 @@ impl Control {
     }
 
     pub fn remove(&mut self, i: usize) -> Result<(), String> {
-        // visto antes de excluir: depois, a conexão do relay excluído pareceria externa
         let was_connected = self.in_use() == Some(i);
         self.change(|b| b.remove(i))?;
         if was_connected {
@@ -463,7 +431,6 @@ mod tests {
         dir
     }
 
-    /// aponta para uma porta sem ninguém: o que interessa é qual relay foi escolhido
     fn control(dir: &Path) -> Control {
         let me = relay::Me {
             id: 1,
@@ -509,7 +476,6 @@ mod tests {
         b.active = Some(1);
         assert_eq!(b.list[1].name, "casa 2");
         assert!(Book::parse(&b.render()).unwrap() == b);
-        // regravar um item não o renomeia por causa dele mesmo
         b.put(Some(1), b.list[1].clone());
         assert_eq!((b.list.len(), b.list[1].name.as_str()), (2, "casa 2"));
         b.remove(0);
@@ -560,7 +526,6 @@ mod tests {
         assert_eq!(addr(&Flags::default(), &env), "env.com:1");
         assert_eq!(addr(&flags, &env), "flag.com:1");
 
-        // erro numa opção interrompe; fora dela só desliga o relay
         let bad = Flags {
             addr: Some("ruim".into()),
             room: None,
@@ -582,7 +547,6 @@ mod tests {
             addr: Some(a.into()),
             room: s.map(Into::into),
         };
-        // a senha veio só do ambiente
         remember(&dir, &flags("a.com:1", None), &mut saved).unwrap();
         assert!(!dir.join(FILE).exists());
         remember(&dir, &flags("a.com:1", Some(S1)), &mut saved).unwrap();
@@ -621,7 +585,6 @@ mod tests {
         c.activate(Some(0)).unwrap();
         assert_eq!(c.in_use(), Some(0));
 
-        // editar outro não mexe na conexão; editar o que está em uso reconecta
         let status = c.handle.as_ref().unwrap().status.clone();
         let same =
             |c: &Control| std::sync::Arc::ptr_eq(&status, &c.handle.as_ref().unwrap().status);

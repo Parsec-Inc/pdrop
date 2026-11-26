@@ -11,27 +11,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// conexões abertas somando todos os IPs
 const MAX_CONNS: u32 = 2048;
-/// por IP, uma cota para cada tipo: quem está na sala não gasta a vaga das transferências
 const MAX_NEW_PER_IP: u32 = 32;
 const MAX_CONTROL_PER_IP: u32 = 32;
 const MAX_TUNNEL_PER_IP: u32 = 32;
 const MAX_ROOM: usize = 32;
 const MAX_ROOMS: usize = 1024;
-/// salas diferentes ocupadas por um mesmo IP, para um só não tomar todas
 const MAX_ROOMS_PER_IP: usize = 8;
-/// entradas na tabela de limite por minuto
 const MAX_TRACKED: usize = 10_000;
-/// mensagens esperando um membro lento; além disso são descartadas
 const QUEUE: usize = 256;
 const MAX_RATE: u32 = 30;
-/// túneis têm cota própria: cada transferência gasta um DIAL e um ACCEPT
 const MAX_TUNNEL_RATE: u32 = 120;
 const WINDOW: Duration = Duration::from_secs(60);
 const MAX_LINE: usize = 512;
 const WAIT: Duration = Duration::from_secs(30);
-/// prazo para o primeiro pedido chegar inteiro
 const FIRST_LINE: Duration = Duration::from_secs(10);
 const WRITE: Duration = Duration::from_secs(5);
 const PAIR: Duration = Duration::from_secs(10);
@@ -39,10 +32,8 @@ const IDLE: u64 = 120;
 const POLL: Duration = Duration::from_secs(5);
 
 struct Member {
-    /// fila de saída: quem repassa nunca espera um destinatário lento
     tx: mpsc::SyncSender<String>,
     sock: Arc<TcpStream>,
-    /// só quem conhece a chave pode tomar o lugar deste uid
     key: u128,
     ip: IpAddr,
     epoch: u64,
@@ -84,7 +75,6 @@ impl State {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
-    /// ainda não mandou a primeira linha
     New,
     Control,
     Tunnel,
@@ -100,7 +90,6 @@ impl Kind {
     }
 }
 
-/// vaga ocupada por uma conexão, devolvida quando ela termina
 struct Slot {
     st: Arc<State>,
     ip: IpAddr,
@@ -125,7 +114,6 @@ impl Slot {
         })
     }
 
-    /// passa a conexão para a cota do seu tipo
     fn become_kind(&mut self, kind: Kind) -> bool {
         let mut c = self.st.conns.lock().unwrap();
         let n = c.entry((self.ip, kind)).or_insert(0);
@@ -179,7 +167,6 @@ fn read_line(s: &mut impl Read) -> io::Result<String> {
     Ok(l)
 }
 
-/// leitura com hora para acabar: o prazo do socket sozinho recomeça a cada byte
 struct Until<'a> {
     s: &'a mut TcpStream,
     end: Instant,
@@ -226,7 +213,6 @@ fn random(b: &mut [u8]) -> io::Result<()> {
     std::fs::File::open("/dev/urandom")?.read_exact(b)
 }
 
-// FFI direto para o relay continuar só com a biblioteca padrão
 #[cfg(windows)]
 fn random(b: &mut [u8]) -> io::Result<()> {
     #[link(name = "bcrypt")]
@@ -239,7 +225,6 @@ fn random(b: &mut [u8]) -> io::Result<()> {
         ) -> i32;
     }
     const USE_SYSTEM_PREFERRED_RNG: u32 = 2;
-    // SAFETY: `b` é um buffer válido de `b.len()` bytes, e com essa flag o algoritmo é nulo
     let status = unsafe {
         BCryptGenRandom(
             std::ptr::null_mut(),
@@ -255,7 +240,6 @@ fn random(b: &mut [u8]) -> io::Result<()> {
     }
 }
 
-/// manda `msg` aos outros membros da sala. Devolve false se `(uid, epoch)` já não é o membro atual
 fn broadcast(st: &State, room: &str, uid: u128, epoch: u64, msg: &str) -> bool {
     let rooms = st.rooms.lock().unwrap();
     let Some(r) = rooms.get(room) else {
@@ -270,8 +254,6 @@ fn broadcast(st: &State, room: &str, uid: u128, epoch: u64, msg: &str) -> bool {
     true
 }
 
-/// thread que escreve na conexão de controle; se a escrita falhar, derruba a conexão inteira,
-/// para não sobrar uma linha cortada ao meio
 fn writer(sock: Arc<TcpStream>) -> io::Result<mpsc::SyncSender<String>> {
     let (tx, rx) = mpsc::sync_channel::<String>(QUEUE);
     thread::Builder::new()
@@ -287,7 +269,6 @@ fn writer(sock: Arc<TcpStream>) -> io::Result<mpsc::SyncSender<String>> {
     Ok(tx)
 }
 
-/// o IP já ocupa o máximo de salas e `room` seria mais uma
 fn too_many_rooms(rooms: &HashMap<String, HashMap<u128, Member>>, ip: IpAddr, room: &str) -> bool {
     let mine = |r: &HashMap<u128, Member>| r.values().any(|m| m.ip == ip);
     !rooms.get(room).is_some_and(mine)
@@ -320,7 +301,6 @@ fn hello(
                 _ => {}
             }
         }
-        // entra na fila antes de aparecer na sala: nada pode chegar antes do OK
         tx.try_send("OK\n".into())
             .map_err(|_| bad("conexão fechada"))?;
         let member = Member {
@@ -334,7 +314,6 @@ fn hello(
         let invites = pending
             .iter()
             .filter(|(_, p)| p.room == room && p.uid == uid);
-        // quem reconecta recebe de novo os convites que podem ter ido para a conexão antiga
         for (tok, _) in invites {
             let _ = member.tx.try_send(format!("INCOMING {tok:x}\n"));
         }
@@ -343,7 +322,6 @@ fn hello(
             let _ = old.sock.shutdown(Shutdown::Both);
         }
     }
-    // qualquer erro daqui em diante, inclusive no envio do OK, passa pela limpeza abaixo
     let res: io::Result<()> = loop {
         match read_line_within(&mut s, WAIT) {
             Ok(l) => {
@@ -375,8 +353,6 @@ fn hello(
 fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()> {
     let tok = token()?;
     let (tx, rx) = mpsc::channel();
-    // com as salas travadas, uma reconexão do alvo vem antes, e ele recebe o convite na conexão
-    // nova, ou depois, e já encontra o pedido pendente para reenviar
     let sent = {
         let rooms = st.rooms.lock().unwrap();
         rooms.get(room).and_then(|r| r.get(&target)).map(|m| {
@@ -395,7 +371,6 @@ fn dial(st: &State, mut s: TcpStream, room: &str, target: u128) -> io::Result<()
         .filter(|&ok| ok)
         .and_then(|_| rx.recv_timeout(PAIR).ok());
     st.pending.lock().unwrap().remove(&tok);
-    // a vaga do ACCEPT dura enquanto o túnel durar
     let Some((mut b, _slot)) = other else {
         return s.write_all(b"ERR\n");
     };
@@ -414,7 +389,6 @@ fn accept(
 ) -> io::Result<()> {
     let p = {
         let mut pending = st.pending.lock().unwrap();
-        // um pedido errado não pode gastar o token do alvo verdadeiro
         match pending.get(&tok) {
             Some(p) if p.room == room && p.uid == uid => pending.remove(&tok),
             _ => None,
@@ -476,7 +450,6 @@ fn handle(st: &State, mut s: TcpStream, mut slot: Slot) -> io::Result<()> {
     s.set_write_timeout(Some(WRITE))?;
     s.set_nodelay(true)?;
     let line = read_line_within(&mut s, FIRST_LINE)?;
-    // linhas inválidas caem na cota menor
     let tunnel = line.starts_with("DIAL ") || line.starts_with("ACCEPT ");
     let ip = slot.ip;
     if !st.allow(ip, tunnel) {
@@ -555,7 +528,6 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let _client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let (s, ip) = l.accept().unwrap();
-        // o envio do OK vai falhar; o prazo evita travar onde o shutdown não acorda a leitura
         s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         s.shutdown(Shutdown::Write).unwrap();
         let st = State::default();
@@ -575,7 +547,6 @@ mod tests {
         (addr, st)
     }
 
-    /// o servidor fechou a conexão sem responder
     fn refused(mut s: TcpStream) -> bool {
         read_line(&mut s).is_err()
     }
@@ -598,7 +569,6 @@ mod tests {
         assert_eq!(read_line(&mut new).unwrap(), "OK");
         assert!(refused(old), "a sessão substituída é fechada");
         writeln!(new, "BEACON voltei").unwrap();
-        // sem GONE no meio: o uid nunca saiu da sala
         assert_eq!(read_line(&mut watcher).unwrap(), "BEACON 1 voltei");
     }
 
@@ -635,7 +605,6 @@ mod tests {
             }
         });
         let t0 = Instant::now();
-        // cada byte chega bem dentro do prazo, mas a linha nunca termina
         assert!(read_line_within(&mut s, Duration::from_millis(400)).is_err());
         assert!(t0.elapsed() < Duration::from_millis(1500));
         drop(s);
@@ -650,7 +619,6 @@ mod tests {
         assert_eq!(read_line(&mut old).unwrap(), "OK");
         let mut d = conn(addr, &format!("DIAL {room} 2"));
         let invite = read_line(&mut old).unwrap();
-        // o alvo volta antes de aceitar
         let mut new = conn(addr, &format!("HELLO {room} 2 7"));
         assert_eq!(read_line(&mut new).unwrap(), "OK");
         assert_eq!(read_line(&mut new).unwrap(), invite);
@@ -680,7 +648,6 @@ mod tests {
         let st = Arc::new(State::default());
         let ip = |n: u32| IpAddr::from(n.to_be_bytes());
         let mut held = vec![];
-        // quem está nas salas não gasta a vaga dos túneis
         for kind in [Kind::Control, Kind::Tunnel] {
             for _ in 0..kind.max_per_ip() {
                 let mut s = Slot::open(&st, ip(1)).unwrap();
@@ -689,7 +656,6 @@ mod tests {
             }
             assert!(!Slot::open(&st, ip(1)).unwrap().become_kind(kind));
         }
-        // o total vale mesmo com cada conexão vindo de um IP
         let mut n = 2;
         while let Some(s) = Slot::open(&st, ip(n)) {
             held.push(s);
@@ -711,7 +677,6 @@ mod tests {
             held.push(s);
         }
         assert!(refused(join(MAX_ROOMS_PER_IP, 1)));
-        // numa sala em que já está, o IP continua podendo entrar
         assert_eq!(read_line(&mut join(0, 2)).unwrap(), "OK");
     }
 

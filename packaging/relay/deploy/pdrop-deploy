@@ -1,15 +1,4 @@
 #!/usr/bin/python3 -I
-"""Publica o pdrop-relay pelo Dokploy, a partir da main.
-
-Fica no servidor do relay, em /usr/local/bin, e é o comando forçado da chave SSH que o
-workflow deploy-relay usa: o que o cliente pedir é ignorado. O deploy não atualiza este
-arquivo; mudou aqui, copie de novo para o servidor.
-
-A saída vai para o log do GitHub Actions, que é público: nunca imprima uma resposta da API,
-que traz variáveis de ambiente e outros dados do servidor.
-
-Com --check (só no próprio servidor), confere a chave e não muda nada.
-"""
 
 import fcntl
 import json
@@ -30,9 +19,7 @@ DOCKERFILE = (
 )
 RELAY = ("127.0.0.1", 4443)
 BUILD_LIMIT = 8 * 60
-# o limite padrão de uma chave do Dokploy é de 10 pedidos por minuto
 POLL = 12
-# o Dokploy marca "done" ao pedir a troca do contêiner, que ainda leva alguns segundos
 SETTLE = 20
 
 
@@ -78,7 +65,6 @@ def branch_is_ready():
 
 
 def relay_answers():
-    """entra numa sala descartável: só um relay no ar responde OK"""
     hello = f"HELLO {secrets.token_hex(32)} 1 1\n".encode()
     for _ in range(12):
         try:

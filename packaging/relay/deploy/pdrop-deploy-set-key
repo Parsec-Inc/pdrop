@@ -1,6 +1,4 @@
 #!/bin/sh
-# Fica no servidor do relay, em /usr/local/sbin. Rode como root, num terminal: guarda a chave da
-# API do Dokploy sem que ela apareça na tela, no histórico do shell ou na lista de processos.
 set -eu
 umask 077
 dir=/etc/pdrop-deploy

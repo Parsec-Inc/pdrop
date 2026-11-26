@@ -1,6 +1,3 @@
-//! cliente do `pdrop-relay`: a conexão de controle, que põe no radar quem está em outra rede,
-//! e os túneis por onde passam as transferências
-
 use crate::net::{self, Peers, Policy, Route};
 use socket2::{SockRef, TcpKeepalive};
 use std::{
@@ -17,9 +14,7 @@ use std::{
 const EVERY: Duration = Duration::from_millis(1500);
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// o relay espera até 10 s o alvo aceitar um túnel: a resposta pode levar mais que isso
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(15);
-/// o relay limita o que recebe a 512 bytes e acrescenta o uid ao repassar
 const MAX_LINE: u64 = 1024;
 
 pub struct Config {
@@ -29,7 +24,6 @@ pub struct Config {
 
 const MIN_SECRET: usize = 16;
 
-/// monta a configuração; sem endereço e sem segredo, o relay fica desligado
 pub fn config(addr: Option<&str>, secret: Option<&str>) -> Result<Option<Config>, String> {
     let (addr, secret) = match (addr.map(str::trim), secret.map(str::trim)) {
         (None, None) => return Ok(None),
@@ -64,28 +58,22 @@ pub struct Me {
     pub policy: Arc<Policy>,
 }
 
-/// como anda a conexão de controle, para a janela mostrar
 #[derive(Clone, Debug)]
 pub enum Link {
     Connecting,
     Up,
-    /// caiu ou não conectou; continua tentando
     Down(String),
-    /// configuração inválida: nem tenta
     Off(String),
 }
 
 pub type Status = Arc<Mutex<Link>>;
 
-/// recebe a transferência de um túnel que outro aparelho abriu até nós
 pub type Incoming = Arc<dyn Fn(TcpStream) + Send + Sync>;
 
-/// o relay só conhece o hash: o segredo não sai daqui
 pub fn room_of(secret: &str) -> String {
     blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
 }
 
-/// liga e desliga a conexão de controle em andamento
 pub struct Handle {
     pub status: Status,
     stop: Arc<Mutex<Stop>>,
@@ -100,8 +88,6 @@ struct Stop {
 }
 
 impl Handle {
-    /// quando volta, esta conexão não mexe mais no radar, mesmo que a thread ainda esteja saindo.
-    /// Transferências que já estão num túnel continuam.
     pub fn stop(self) {
         let mut g = self.stop.lock().unwrap();
         g.stopped = true;
@@ -156,7 +142,6 @@ pub fn watch(cfg: Config, me: Me, peers: Peers, incoming: Incoming) -> Handle {
                 eprintln!("relay: {error}; tentando de novo");
                 last_error = error;
             }
-            // só zera a espera se a conexão durou, para não insistir num relay que fecha logo
             if start.elapsed() > MAX_BACKOFF {
                 wait = Duration::from_secs(1);
             }
@@ -191,8 +176,6 @@ fn dial_tcp(addr: &str) -> io::Result<TcpStream> {
     Err(last)
 }
 
-/// prova que quem volta a uma sala com o mesmo uid é o mesmo aparelho. Sai da chave privada,
-/// então os outros membros não a conhecem, e muda de uma sala para outra
 fn membership_key(private: &[u8; 32], room: &str) -> u128 {
     let material = [private.as_slice(), room.as_bytes()].concat();
     let k = blake3::derive_key("pdrop relay membership v1", &material);
@@ -203,14 +186,12 @@ fn connect(cfg: &Config, me: &Me) -> io::Result<BufReader<TcpStream>> {
     let mut s = dial_tcp(&cfg.addr)?;
     s.set_read_timeout(Some(TIMEOUT))?;
     s.set_write_timeout(Some(TIMEOUT))?;
-    // o relay não manda heartbeat: é o TCP que precisa perceber a conexão morta
     let sock = SockRef::from(&s);
     sock.set_tcp_keepalive(
         &TcpKeepalive::new()
             .with_time(Duration::from_secs(20))
             .with_interval(Duration::from_secs(5)),
     )?;
-    // com beacons sem confirmação o keepalive não dispara; no Linux isto cobre o caso
     #[cfg(target_os = "linux")]
     sock.set_tcp_user_timeout(Some(Duration::from_secs(30)))?;
     let key = membership_key(&me.policy.key, &cfg.room);
@@ -223,7 +204,6 @@ fn connect(cfg: &Config, me: &Me) -> io::Result<BufReader<TcpStream>> {
     Ok(r)
 }
 
-/// abre um túnel até outro membro da sala
 pub fn dial(cfg: &Config, target: u128) -> io::Result<TcpStream> {
     tunnel(&cfg.addr, &format!("DIAL {} {target:x}", cfg.room))
 }
@@ -238,7 +218,6 @@ fn tunnel(addr: &str, request: &str) -> io::Result<TcpStream> {
     s.set_write_timeout(Some(TIMEOUT))?;
     s.set_nodelay(true)?;
     s.write_all(format!("{request}\n").as_bytes())?;
-    // um byte por vez: o que vem depois do OK já é do handshake e não pode ficar num buffer
     let mut answer = Vec::new();
     let mut byte = [0u8; 1];
     while answer.len() < 8 {
@@ -272,7 +251,6 @@ fn read_line(r: &mut impl BufRead) -> io::Result<String> {
     Ok(l)
 }
 
-/// anuncia e escuta até a conexão cair
 fn session(
     mut r: BufReader<TcpStream>,
     cfg: &Arc<Config>,
@@ -299,7 +277,6 @@ fn session(
     let error = loop {
         match read_line(&mut r) {
             Ok(l) => {
-                // com a trava na mão, um `Handle::stop` não passa no meio de uma atualização
                 let g = halt.lock().unwrap();
                 if g.stopped {
                     break io::Error::other("relay desligado");
@@ -319,7 +296,6 @@ fn session(
     error
 }
 
-/// atende um INCOMING numa thread própria, sem parar a conexão de controle
 fn answer(token: &str, cfg: &Arc<Config>, uid: u128, incoming: &Incoming) {
     let Ok(token) = u128::from_str_radix(token, 16) else {
         return;
@@ -334,7 +310,6 @@ fn answer(token: &str, cfg: &Arc<Config>, uid: u128, incoming: &Incoming) {
 fn announce(me: &Me) -> String {
     let vis = me.policy.vis.load(Ordering::Relaxed);
     if vis == net::VIS_HIDDEN {
-        // o relay ignora a linha, mas ela evita ser derrubado por 30 s de silêncio
         return "PING\n".into();
     }
     format!(
@@ -382,8 +357,6 @@ fn handle(line: &str, cfg: &Arc<Config>, me: &Me, peers: &Peers) {
     );
 }
 
-/// o relay deixou de alcançar um uid (ou todos): some do radar quem só era alcançado por ele,
-/// e quem está na LAN perde o caminho alternativo
 fn drop_relay_peers(peers: &Peers, uid: Option<u128>) {
     peers.lock().unwrap().retain(|_, p| {
         if uid.is_some_and(|u| u != p.uid) {
@@ -482,7 +455,6 @@ mod tests {
         };
         let up = start(&start_server());
         until("conectado", || matches!(*up.lock().unwrap(), Link::Up));
-        // porta que acabou de ser liberada: ninguém escutando
         let closed = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -512,14 +484,12 @@ mod tests {
         until("a e b se veem", || {
             a.lock().unwrap().contains_key(&2) && b.lock().unwrap().contains_key(&1)
         });
-        // quem também está na LAN continua no radar, só sem o caminho pelo relay
         let lan = Route::Lan(([127, 0, 0, 1], 1).into());
         net::upsert(&a, 9, "perto".into(), lan, 0, 0xa, Instant::now());
         let status = ha.status.clone();
         ha.stop();
         assert!(a.lock().unwrap().keys().eq([&9]));
         until("b vê a saída", || !b.lock().unwrap().contains_key(&1));
-        // passa de alguns beacons e do primeiro intervalo de reconexão
         sleep(EVERY * 2);
         assert!(a.lock().unwrap().keys().eq([&9]));
         assert!(!b.lock().unwrap().contains_key(&1), "voltou à sala");
@@ -566,7 +536,6 @@ mod tests {
             ..me(id, net::VIS_ALL)
         };
 
-        // quem recebe aceita tudo
         let (rtx, rrx) = channel();
         let policy = Arc::new(Policy {
             key: rk,
@@ -632,7 +601,6 @@ mod tests {
             assert_eq!(std::fs::read(out.join("origem").join(f)).unwrap(), big);
         }
 
-        // porta da LAN inacessível, ou que conecta e não completa o handshake: sai pelo relay
         let closed = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -654,7 +622,6 @@ mod tests {
             assert_eq!(received(), Ok("pela volta".into()));
         }
 
-        // ninguém com esse uid na sala
         let ghost = net::Peer {
             uid: ruid ^ 1,
             ..to
@@ -678,7 +645,6 @@ mod tests {
         assert_eq!(peers.lock().unwrap().len(), 3);
         assert_eq!(peers.lock().unwrap()[&3].name, "com|barra");
 
-        // quem está na LAN também é visto pelo relay: o GONE só tira o caminho alternativo
         let lan = Route::Lan(([127, 0, 0, 1], 1).into());
         net::upsert(&peers, 5, "dois".into(), lan, 0, 0xf, Instant::now());
         handle("BEACON f 5|0|0|dois", &me, &peers);

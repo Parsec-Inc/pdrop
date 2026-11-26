@@ -1,17 +1,13 @@
-//! tela dos relays: a lista dos salvos e o formulário de um deles
-
 use super::*;
 use crate::relays::{Env, NAME_MAX, Profile};
 
 #[derive(Default)]
 pub struct RelayPanel {
     form: Option<Form>,
-    /// relay esperando o segundo clique para ser excluído
     deleting: Option<usize>,
 }
 
 impl RelayPanel {
-    /// esc: sai do formulário ou desiste de excluir. False quando não havia o que desfazer
     pub fn back(&mut self) -> bool {
         self.form.take().is_some() | self.deleting.take().is_some()
     }
@@ -19,7 +15,6 @@ impl RelayPanel {
 
 #[derive(Default)]
 struct Form {
-    /// posição do relay em edição; `None` para um novo
     at: Option<usize>,
     name: String,
     addr: String,
@@ -29,7 +24,6 @@ struct Form {
     focus: bool,
 }
 
-/// 128 bits aleatórios, tirados de uma chave nova
 fn new_secret() -> String {
     let (key, _) = crate::secure::generate();
     blake3::hash(&key).to_hex()[..32].to_string()
@@ -211,7 +205,6 @@ fn form(ui: &mut egui::Ui, app: &App, f: &mut Form, todo: &mut Option<Todo>) {
     let focus = std::mem::take(&mut f.focus);
     let mut enter = false;
     let mut field = |ui: &mut egui::Ui, label: &str, edit: egui::TextEdit| {
-        // rótulo ao lado do campo: o formulário precisa caber na janela baixa
         let r = ui
             .horizontal(|ui| {
                 let (slot, _) = ui.allocate_exact_size(vec2(55.0 * S, 16.0 * S), Sense::hover());
@@ -256,7 +249,6 @@ fn form(ui: &mut egui::Ui, app: &App, f: &mut Form, todo: &mut Option<Todo>) {
         if button(ui, sp, None, label, "", true, None).clicked() {
             f.show = !f.show;
         }
-        // só com o campo vazio, para um clique não apagar uma senha em uso
         let empty = f.secret.is_empty();
         if button(ui, sp, None, "Gerar", "", empty, None).clicked() && empty {
             f.secret = new_secret();

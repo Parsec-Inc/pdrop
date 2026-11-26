@@ -436,7 +436,6 @@ fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::HistStep(d) => app.hist_step(d),
         Act::HistReveal => app.hist_reveal(),
         Act::HistResend => app.hist_resend(peers),
-        // a tela dos relays fecha uma coisa por vez: o formulário, depois ela mesma
         Act::Cancel if app.relay_ui.is_some() => {
             if app.relay_ui.as_mut().is_some_and(|p| !p.back()) {
                 app.relay_ui = None;
@@ -502,7 +501,6 @@ fn keys(ctx: &egui::Context, app: &App) -> Act {
         if k(Key::W) {
             return Act::Relays;
         }
-        // com a tela dos relays aberta, os atalhos do radar ficam parados
         if app.relay_ui.is_some() {
             return Act::None;
         }
@@ -629,12 +627,10 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         });
 }
 
-/// devolve true quando clicam no estado do relay
 fn header(ui: &mut egui::Ui, app: &App, peers: &[Peer]) -> bool {
     let mut open_relays = false;
     let acc = app.acc();
     let n = peers.len();
-    // com alguém vindo pelo relay, "por perto" deixa de ser verdade
     let near = if peers.iter().any(Peer::via_relay) {
         "no radar"
     } else {
@@ -702,7 +698,6 @@ fn firewall_bar(ui: &mut egui::Ui, app: &mut App) {
         });
 }
 
-/// o motivo da falha fica à vista: quem abre pelo menu não vê o terminal
 fn relay_bar(ui: &mut egui::Ui, app: &App) {
     let Some(link) = app.relay.link() else {
         return;
@@ -1615,7 +1610,6 @@ fn tagged(app: &App, q: &Peer) -> String {
     }
 }
 
-/// nome no radar e na constelação, dizendo quem vem pelo relay
 fn labeled(app: &App, q: &Peer) -> String {
     let name = tagged(app, q);
     if q.via_relay() {

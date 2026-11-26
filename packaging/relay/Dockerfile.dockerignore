@@ -1,5 +1,3 @@
-# só o fonte do relay vai para o build. Cada pasta do caminho é reincluída, para não depender
-# de como a ferramenta trata exceções dentro de uma pasta excluída
 *
 !src
 src/*
