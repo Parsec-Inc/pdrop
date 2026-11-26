@@ -170,6 +170,25 @@ impl App {
         }
     }
 
+    // seleciona o `step`-ésimo resultado da busca a partir do atual (0: mantém, se ainda casar)
+    pub(crate) fn search_pick(&mut self, peers: &[Peer], step: isize) {
+        let hits = self.search_hits(peers);
+        if !hits.is_empty() {
+            let i = hits.iter().position(|&id| Some(id) == self.sel);
+            let i = i.map_or(0, |i| i as isize + step);
+            self.sel = Some(hits[i.rem_euclid(hits.len() as isize) as usize]);
+        }
+    }
+
+    pub(crate) fn search_hits(&self, peers: &[Peer]) -> Vec<u64> {
+        let q = self.search.as_deref().unwrap_or("").trim().to_lowercase();
+        peers
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&q))
+            .map(|p| p.id)
+            .collect()
+    }
+
     pub(crate) fn send_input(&mut self, peers: &[Peer]) {
         let text = self.input.take().unwrap_or_default();
         if !text.trim().is_empty() {

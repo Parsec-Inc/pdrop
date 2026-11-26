@@ -1,4 +1,4 @@
-use super::{Raster, labeled, layout, out_expo};
+use super::{Raster, camera, labeled, layout, offscreen, out_expo};
 use crate::{
     App,
     net::{Peer, State},
@@ -12,24 +12,24 @@ use std::f64::consts::TAU;
 pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let acc = app.acc();
     let t = app.anim;
-    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click());
+    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let rect = Rect::from_min_max(snap(resp.rect.min), snap(resp.rect.max));
     let (w, h) = ((rect.width() / S) as usize, (rect.height() / S) as usize);
     if w < 8 || h < 8 {
         return;
     }
-    let (cx, cy) = (w as i32 / 2, h as i32 / 2);
     let r = ((w.min(h) as f64 / 2.0) - 20.0).max(30.0);
     let sweep = -(t * 1.1);
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
-    let spots = layout(&p, peers, (cx, cy), (r, r), |q| {
+    let spots = layout(&p, peers, (w, h), (r, r), |q| {
         if q.via_relay() || q.rtt.is_some_and(|ms| ms > 15.0) {
             0.85
         } else {
             0.5
         }
     });
-    let place = |q: &Peer| spots[&q.id];
+    let ((cx, cy), placed) = camera(app, &resp, &spots, (w, h));
+    let place = |q: &Peer| placed[&q.id];
     let granted: Vec<u128> = app.grants.lock().unwrap().keys().copied().collect();
     let busy: Vec<_> = app
         .xfers
@@ -205,6 +205,8 @@ pub(in crate::ui) fn radar(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             c(lab),
         );
     }
+
+    offscreen(&p, rect, peers.iter().map(|q| scr(place(q))));
 
     let ctr = scr((cx, cy));
     p.text(

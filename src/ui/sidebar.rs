@@ -126,7 +126,7 @@ fn eta(s: u64) -> String {
 
 // texto de uma mensagem: um trecho na lista, inteiro (e selecionável) quando aberto
 fn message(ui: &mut egui::Ui, text: &str, open: bool) {
-    let max = if open { 4000 } else { 80 };
+    let max = if open { usize::MAX } else { 80 };
     let mut s: String = text.chars().take(max).collect();
     if !open {
         s = s.replace(['\n', '\r', '\t'], " ");

@@ -1,4 +1,4 @@
-use super::{Raster, angle, gone, hash, labeled, layout, pop, unit};
+use super::{Raster, angle, camera, gone, hash, labeled, layout, offscreen, pop, unit};
 use crate::{
     App,
     net::{Peer, State},
@@ -12,7 +12,7 @@ use std::f64::consts::TAU;
 // constelação: céu noturno, cada peer é uma estrela ligada a você
 pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
     let (acc, t) = (app.acc(), app.anim);
-    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click());
+    let (resp, p) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let outer = Rect::from_min_max(snap(resp.rect.min), snap(resp.rect.max)).shrink(6.0 * S);
     let rect = outer.shrink(4.0 * S);
     let (w, h) = ((rect.width() / S) as usize, (rect.height() / S) as usize);
@@ -20,13 +20,13 @@ pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         return;
     }
     p.add(app.sp.ui.nine(7, outer, 4.0, Color32::WHITE));
-    let (cx, cy) = (w as i32 / 2, h as i32 / 2);
     let (rx, ry) = (
         (w as f64 / 2.0 - 30.0).max(20.0),
         (h as f64 / 2.0 - 24.0).max(20.0),
     );
-    let spots = layout(&p, peers, (cx, cy), (rx, ry), |q| 0.45 + 0.5 * unit(q.id));
-    let place = |q: &Peer| spots[&q.id];
+    let spots = layout(&p, peers, (w, h), (rx, ry), |q| 0.45 + 0.5 * unit(q.id));
+    let ((cx, cy), placed) = camera(app, &resp, &spots, (w, h));
+    let place = |q: &Peer| placed[&q.id];
     let scr = |(x, y): (i32, i32)| rect.min + vec2((x as f32 + 0.5) * S, (y as f32 + 0.5) * S);
     if resp.clicked()
         && let Some(m) = resp.interact_pointer_pos()
@@ -129,6 +129,7 @@ pub(in crate::ui) fn sky(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             c(lab),
         );
     }
+    offscreen(&p, rect, peers.iter().map(|q| scr(place(q))));
     let ctr = scr((cx, cy));
     p.text(
         snap(ctr + vec2(0.0, 5.0 * S)),

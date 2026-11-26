@@ -19,6 +19,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+// (visão, peer selecionado, posição dele, tamanho do mapa)
+pub(crate) type CamKey = (u8, u64, (i32, i32), (usize, usize));
+
 pub struct App {
     pub me: String,
     pub peers: Peers,
@@ -56,6 +59,13 @@ pub struct App {
     pub marked: std::collections::HashSet<u64>,
     pub view: u8,
     pub cols: usize,
+    pub search: Option<String>,
+    // câmera do radar e da constelação: deslocamento, e a seleção para a qual ele foi calculado
+    pub pan: eframe::egui::Vec2,
+    pub(crate) cam_key: Option<CamKey>,
+    // o que está na tela agora, a caminho dos destinos acima
+    pub(crate) pan_now: eframe::egui::Vec2,
+    pub(crate) drawn: std::collections::HashMap<u64, eframe::egui::Vec2>,
     pub more: bool,
 }
 
@@ -138,6 +148,7 @@ impl App {
             Msg::Clip(from, c) => {
                 if self.clips.front().is_none_or(|(_, f)| f.data != c.data) {
                     self.clips.push_front((from, c));
+                    self.clip_sel = self.clip_sel.map(|i| keep(i, self.clips.len()));
                 }
                 self.clips.truncate(20);
                 while self.clips.len() > 1
@@ -150,6 +161,9 @@ impl App {
                 {
                     self.clips.pop_back();
                 }
+                self.clip_sel = self
+                    .clip_sel
+                    .map(|i| i.min(self.clips.len().saturating_sub(1)));
             }
             Msg::Auto(t) => {
                 notify(format!("{} enviou uma mensagem", t.peer), None);
@@ -204,6 +218,7 @@ impl App {
                         append_hist(&rec);
                         self.hist.push(rec);
                         self.hist.drain(..self.hist.len().saturating_sub(HIST_MAX));
+                        self.hist_sel = self.hist_sel.map(|i| keep(i, self.hist.len()));
                     }
                 }
             }
@@ -248,6 +263,12 @@ impl eframe::App for App {
         ui::draw(ui, self, &peers);
         ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
+}
+
+// listas mostradas da mais nova para a mais antiga: ao entrar uma no topo, o item `i`
+// selecionado passa a ser o `i + 1`
+fn keep(i: usize, len: usize) -> usize {
+    (i + 1).min(len.saturating_sub(1))
 }
 
 pub const NAME_MAX: usize = 32;

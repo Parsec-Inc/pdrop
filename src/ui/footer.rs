@@ -134,6 +134,35 @@ pub(super) fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             {
                 act = Act::SetName;
             }
+        } else if app.search.is_some() {
+            ui.label(txt("buscar ›", acc));
+            let focus = std::mem::take(&mut app.focus);
+            #[allow(clippy::unnecessary_unwrap)]
+            let buf = app.search.as_mut().unwrap();
+            let r = well(
+                ui,
+                &app.sp,
+                egui::TextEdit::singleline(buf)
+                    .hint_text(txt("nome do aparelho", DIM))
+                    .desired_width(220.0),
+            );
+            if focus {
+                r.request_focus();
+            }
+            let step = ui.input(|i| {
+                i.key_pressed(Key::ArrowDown) as isize - i.key_pressed(Key::ArrowUp) as isize
+            });
+            if r.changed() || step != 0 {
+                app.search_pick(peers, step);
+            }
+            let hits = app.search_hits(peers);
+            ui.label(match hits.iter().position(|&id| Some(id) == app.sel) {
+                Some(i) => txt(format!("{} de {} · ↑↓ enter", i + 1, hits.len()), MUTED),
+                None => txt("ninguém com esse nome", WARN),
+            });
+            if r.lost_focus() {
+                app.search = None;
+            }
         } else if app.input.is_some() {
             let n = app.targets(peers).len();
             ui.label(txt(
@@ -310,6 +339,10 @@ pub(super) fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
             act = Act::CutBridges;
         }
         let relays_open = app.relay_ui.is_some().then_some(acc);
+        let searching = app.search.is_some().then_some(acc);
+        if button(ui, sp, None, "Buscar", "F", has, searching).clicked() {
+            act = Act::OpenSearch;
+        }
         if button(ui, sp, None, "Relay", "W", true, relays_open).clicked() {
             act = Act::Relays;
         }

@@ -60,6 +60,7 @@ Abra o `pdrop` em duas ou mais máquinas na mesma rede e elas aparecem como pont
 - **Compartilhar clipboard** (`v`) — envia o clipboard inteiro uma vez; ele cai no clipboard do peer com o mesmo tipo (texto, ou imagens com `wl-clipboard`/`xclip`).
 - **Ponte de clipboard** (`b`) — ligada, *tudo o que você copia* vai para o peer automaticamente, como um clipboard compartilhado. Quem recebe aprova uma vez por sessão; as cópias seguintes chegam sem perguntar.
 - **Radar ao vivo** — radar animado com a varredura e um ponto para cada peer, na cor de destaque escolhida por ele, com um ícone em pixel art orbitando e pulsando quando a varredura passa. A latência (RTT) coloca os peers próximos no anel interno.
+- **Sem sobreposição** — no radar e na constelação, um peer nunca cobre o outro. Quando não cabem todos, os que sobram ficam mais longe do centro, fora da tela: arraste o mapa, passe por eles com `←/→` ou busque pelo nome (`f`).
 - **Identidade** — escolha a sua cor (`c`), o ícone (`i`) e o nome (`r`); tudo fica salvo em `~/.config/pdrop` e é divulgado para os outros verem.
 - **Pedidos de aceitar/recusar** — as transferências recebidas perguntam y/n no app, além de uma notificação do sistema (`notify-send` no Linux, `osascript` no macOS) para você perceber mesmo com a janela em segundo plano.
 - **Seguro por construção** — os nomes de arquivo recebidos são reduzidos ao último componente do caminho, arquivos existentes nunca são sobrescritos (`foto.jpg`, `foto (1).jpg`, …), uma gravação que falha apaga o arquivo parcial, mensagens de texto são limitadas a 1 MiB e o clipboard a 64 MiB.
@@ -139,7 +140,7 @@ pdrop send [--to NOME] [--peer IP]... [--as NOME] [--relay HOST:PORTA] [--room S
 | `--peer`, `-p IP` | Também envia os beacons de descoberta direto para esse IP. Repita a opção para vários peers. Útil em redes que filtram broadcast/multicast — basta apontar para o IP da outra máquina. |
 | `--dir`, `-d PASTA` | Onde os arquivos recebidos caem, no lugar de `~/Downloads` (as regras de recebimento continuam valendo primeiro). |
 | `--relay HOST:PORTA`, `--room SEGREDO` | Alcança aparelhos em outras redes (veja [Conectando a um relay](#conectando-a-um-relay)). |
-| `--calm` | Animação mais lenta e discreta. Fica ainda mais lenta enquanto você digita ou há um pedido pendente. |
+| `--calm` | Animação mais lenta e discreta, ainda mais lenta enquanto você digita ou há um pedido pendente. Os aparelhos e a câmera do mapa vão direto para o novo lugar. |
 
 Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentro da janela, ou com `pdrop send` (veja acima).
 
@@ -168,6 +169,7 @@ Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentr
 | `p` | Abre o histórico de clipboards recebidos (`↑/↓`, `enter` para restaurar) |
 | `g` | Abre ou fecha o histórico (`↑/↓` navegam, `enter` mostra na pasta, `e` reenvia) |
 | `y` / `n` | Aceita / recusa uma transferência ou pedido de ponte recebido |
+| `f` | Busca um peer pelo nome (`↑/↓` passam pelos resultados, `enter` fecha); o radar e a constelação vão até ele |
 | `w` | Abre ou fecha a tela dos relays (também pelo botão *Relay*) |
 | `esc` | Cancela o prompt ou seletor aberto |
 | `q`, `ctrl+c` | Sai |

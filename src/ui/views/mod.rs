@@ -12,7 +12,7 @@ use crate::{
     net::{Peer, State},
 };
 use eframe::egui::{self, Color32, Pos2};
-use std::{collections::HashMap, f64::consts::TAU};
+use std::{collections::HashMap, f32::consts::PI, f64::consts::TAU};
 
 struct Raster {
     w: usize,
@@ -87,61 +87,201 @@ fn footprint((x, y): (i32, i32), half: f32) -> egui::Rect {
     egui::Rect::from_min_max(at - egui::vec2(half, ABOVE), at + egui::vec2(half, BELOW))
 }
 
-// Posição de cada peer, em pixels do raster a partir do centro. `wants` é (ângulo, distância
-// preferida de 0 a 1, meia largura), em ordem de chegada: quem já estava não sai do lugar quando
-// entra alguém. Entre as vagas livres, fica a mais perto da preferida, mudando antes o ângulo que
-// a distância. Sem vaga livre (janela pequena demais), fica a que menos sobrepõe.
-fn spread(wants: &[(f64, f64, f32)], (rx, ry): (f64, f64), center_half: f32) -> Vec<(i32, i32)> {
+// Posição de cada peer, em pixels do raster a partir do centro, e se ela cabe em `bounds` (a tela).
+// `wants` é (ângulo, distância preferida de 0 a 1, meia largura), em ordem de chegada: quem já
+// estava não sai do lugar quando entra alguém. Entre as vagas livres na tela, fica a mais perto da
+// preferida, mudando antes o ângulo que a distância. Sem vaga na tela, vai para o primeiro anel
+// mais afastado que tenha uma (aí é preciso navegar até lá). Nunca há sobreposição.
+fn spread(
+    wants: &[(f64, f64, f32)],
+    (rx, ry): (f64, f64),
+    bounds: egui::Rect,
+    center_half: f32,
+) -> Vec<((i32, i32), bool)> {
     const TURNS: i32 = 90;
     let mut taken = vec![footprint((0, 0), center_half)];
     wants
         .iter()
         .map(|&(ang, want, half)| {
-            let (_, _, at) = (5..=20)
-                .flat_map(|k| (0..TURNS).map(move |i| (k as f64 * 0.05, i)))
-                .map(|(k, i)| {
+            let at = |k: f64, turn: f64| {
+                (
+                    (rx * k * (ang + turn).cos()).round() as i32,
+                    -(ry * k * (ang + turn).sin()).round() as i32,
+                )
+            };
+            // encostar na borda pode; ter área em comum não
+            let free = |at| {
+                let me = footprint(at, half);
+                !taken.iter().any(|o| o.intersect(me).is_positive())
+            };
+            // (afastamento da preferida, posição) da melhor vaga que aparece inteira na tela
+            let mut best: Option<(f64, (i32, i32))> = None;
+            for k in (5..=20).map(|k| k as f64 * 0.05) {
+                for i in 0..TURNS {
                     let turn = i as f64 / TURNS as f64 * TAU;
-                    let a = ang + turn;
-                    let at = (
-                        (rx * k * a.cos()).round() as i32,
-                        -(ry * k * a.sin()).round() as i32,
-                    );
-                    let me = footprint(at, half);
-                    let over: f32 = taken
-                        .iter()
-                        .filter(|o| o.intersects(me))
-                        .map(|o| o.intersect(me).area())
-                        .sum();
-                    (over, turn.min(TAU - turn) + 4.0 * (k - want).abs(), at)
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
-                .unwrap();
-            taken.push(footprint(at, half));
-            at
+                    let cost = turn.min(TAU - turn) + 4.0 * (k - want).abs();
+                    // já há vaga mais perto: nem precisa testar colisão
+                    if best.is_some_and(|(b, _)| cost >= b) {
+                        continue;
+                    }
+                    let p = at(k, turn);
+                    if bounds.contains_rect(footprint(p, half)) && free(p) {
+                        best = Some((cost, p));
+                    }
+                }
+            }
+            let spot = match best {
+                Some((_, p)) => (p, true),
+                None => {
+                    // 0, +1, -1, +2, -2…: a primeira vaga é a de ângulo mais perto do preferido
+                    let turns = (0..TURNS).map(|i| {
+                        let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+                        side * ((i + 1) / 2) as f64 / TURNS as f64 * TAU
+                    });
+                    // sempre termina: longe o bastante, há espaço de sobra
+                    let p = (5..)
+                        .find_map(|k| {
+                            turns
+                                .clone()
+                                .map(|t| at(k as f64 * 0.05, t))
+                                .find(|&p| free(p))
+                        })
+                        .unwrap();
+                    (p, bounds.contains_rect(footprint(p, half)))
+                }
+            };
+            taken.push(footprint(spot.0, half));
+            spot
         })
         .collect()
 }
 
-// `spread` para os peers da tela, já em coordenadas do raster
+#[derive(Clone, Copy)]
+struct Spot {
+    at: (i32, i32), // relativo ao centro
+    fits: bool,     // aparece inteiro sem navegar
+}
+
+// última entrada de `spread` e o resultado
+type Cached = (
+    (Vec<(f64, f64, f32)>, (f64, f64), egui::Rect, f32),
+    Vec<((i32, i32), bool)>,
+);
+
+// `spread` para os peers da tela, de tamanho `w`×`h` no raster
 fn layout(
     p: &egui::Painter,
     peers: &[Peer],
-    (cx, cy): (i32, i32),
+    (w, h): (usize, usize),
     radii: (f64, f64),
     dist: impl Fn(&Peer) -> f64,
-) -> HashMap<u64, (i32, i32)> {
+) -> HashMap<u64, Spot> {
     let mut order: Vec<&Peer> = peers.iter().collect();
     order.sort_by_key(|q| (q.born, q.id));
     let wants: Vec<_> = order
         .iter()
         .map(|q| (angle(q.id), dist(q), half_width(p, q)))
         .collect();
-    let at = spread(&wants, radii, text_half(p, "você".into()));
+    let half = egui::vec2((w / 2) as f32 * S, (h / 2) as f32 * S);
+    let bounds = egui::Rect::from_min_max((-half).to_pos2(), half.to_pos2());
+    // recalculado só quando a entrada muda, não a cada quadro
+    let key = (wants, radii, bounds, text_half(p, "você".into()));
+    let id = egui::Id::unique("spots");
+    let cached = p.ctx().data(|d| d.get_temp::<Cached>(id));
+    let at = match cached.filter(|(k, _)| *k == key) {
+        Some((_, at)) => at,
+        None => {
+            let at = spread(&key.0, key.1, key.2, key.3);
+            p.ctx().data_mut(|d| d.insert_temp(id, (key, at.clone())));
+            at
+        }
+    };
     order
         .iter()
         .zip(at)
-        .map(|(q, (x, y))| (q.id, (cx + x, cy + y)))
+        .map(|(q, (at, fits))| (q.id, Spot { at, fits }))
         .collect()
+}
+
+// Um passo de `from` até `to`, andando a fração `t` do que falta. Vai em coordenadas polares:
+// quem muda de lado contorna o centro em vez de passar por cima de "você".
+fn glide(from: egui::Vec2, to: egui::Vec2, t: f32) -> egui::Vec2 {
+    if (to - from).length() < 0.5 {
+        return to;
+    }
+    let turn = (to.angle() - from.angle() + PI).rem_euclid(2.0 * PI) - PI;
+    egui::Vec2::angled(from.angle() + turn * t) * egui::lerp(from.length()..=to.length(), t)
+}
+
+// Onde cada coisa está neste quadro: o centro do mapa e cada peer, no raster.
+// Quando a seleção muda (ou o lugar dela), a câmera vai até ela se estiver fora da tela, ou volta para o centro; depois disso dá para arrastar.
+fn camera(
+    app: &mut App,
+    resp: &egui::Response,
+    spots: &HashMap<u64, Spot>,
+    (w, h): (usize, usize),
+) -> ((i32, i32), HashMap<u64, (i32, i32)>) {
+    let sel = app.sel.and_then(|id| Some((id, *spots.get(&id)?)));
+    let key = sel.map(|(id, s)| (app.view, id, s.at, (w, h)));
+    if app.cam_key != key {
+        app.cam_key = key;
+        app.pan = match sel {
+            Some((_, s)) if !s.fits => egui::vec2(s.at.0 as f32, s.at.1 as f32),
+            _ => egui::Vec2::ZERO,
+        };
+    }
+    if resp.dragged() {
+        // não deixa o mapa se perder: só até o peer mais distante
+        let far =
+            |f: fn(&Spot) -> i32| spots.values().map(|s| f(s).abs()).max().unwrap_or(0) as f32;
+        let (mx, my) = (far(|s| s.at.0), far(|s| s.at.1));
+        app.pan -= resp.drag_delta() / S;
+        app.pan = app.pan.clamp(egui::vec2(-mx, -my), egui::vec2(mx, my));
+    }
+    // desaceleração exponencial: ~95% do caminho em 200 ms, e aceita mudar de destino no meio.
+    // Com `--calm`, tudo vai direto para o lugar
+    let t = if app.calm {
+        1.0
+    } else {
+        1.0 - (-15.0 * resp.ctx.input(|i| i.stable_dt).min(0.1)).exp()
+    };
+    // arrastando, o mapa acompanha o mouse sem atraso
+    app.pan_now = if resp.dragged() || (app.pan - app.pan_now).length() < 0.5 {
+        app.pan
+    } else {
+        app.pan_now + (app.pan - app.pan_now) * t
+    };
+    let center = (
+        (w / 2) as i32 - app.pan_now.x.round() as i32,
+        (h / 2) as i32 - app.pan_now.y.round() as i32,
+    );
+    app.drawn.retain(|id, _| spots.contains_key(id));
+    let placed = spots
+        .iter()
+        .map(|(&id, s)| {
+            let to = egui::vec2(s.at.0 as f32, s.at.1 as f32);
+            // quem acabou de chegar já nasce no lugar
+            let now = app.drawn.entry(id).or_insert(to);
+            *now = glide(*now, to, t);
+            let (x, y) = (now.x.round() as i32, now.y.round() as i32);
+            (id, (center.0 + x, center.1 + y))
+        })
+        .collect();
+    (center, placed)
+}
+
+// avisa que há gente além da borda
+fn offscreen(p: &egui::Painter, rect: egui::Rect, at: impl Iterator<Item = Pos2>) {
+    let n = at.filter(|a| !rect.contains(*a)).count();
+    if n > 0 {
+        p.text(
+            snap(rect.left_top() + egui::vec2(4.0 * S, 2.0 * S)),
+            egui::Align2::LEFT_TOP,
+            format!("+{n} fora da tela · arraste ou busque (F)"),
+            egui::FontId::proportional(TXT),
+            c(MUTED),
+        );
+    }
 }
 
 fn out_expo(x: f64) -> f64 {
@@ -209,19 +349,43 @@ fn pop(app: &App, p: &egui::Painter, q: &Peer, pos: Pos2, col: Rgb) {
 mod tests {
     use super::*;
 
+    fn check(wants: &[(f64, f64, f32)], bounds: egui::Rect) -> Vec<((i32, i32), bool)> {
+        let spots = spread(wants, (60.0, 45.0), bounds, 30.0);
+        let mut boxes = vec![footprint((0, 0), 30.0)];
+        for (&(at, fits), w) in spots.iter().zip(wants) {
+            let me = footprint(at, w.2);
+            assert_eq!(fits, bounds.contains_rect(me), "{me:?}");
+            boxes.push(me);
+        }
+        for (i, a) in boxes.iter().enumerate() {
+            for b in &boxes[i + 1..] {
+                assert!(!a.intersect(*b).is_positive(), "{a:?} {b:?}");
+            }
+        }
+        spots
+    }
+
     #[test]
     fn peers_never_overlap() {
         // pior caso: todo mundo querendo o mesmo ponto
-        let wants = vec![(1.0, 0.5, 60.0); 12];
-        let at = spread(&wants, (300.0, 220.0), 30.0);
-        let mut boxes = vec![footprint((0, 0), 30.0)];
-        boxes.extend(at.iter().map(|&a| footprint(a, 60.0)));
-        for (i, a) in boxes.iter().enumerate() {
-            for b in &boxes[i + 1..] {
-                assert!(!a.intersects(*b), "{a:?} {b:?}");
-            }
-        }
+        let wants = vec![(1.0, 0.5, 60.0); 40];
+        let rect = |x: f32, y: f32| egui::Rect::from_min_max(egui::pos2(-x, -y), egui::pos2(x, y));
+        let wide = check(&wants[..4], rect(640.0, 480.0));
+        assert!(wide.iter().all(|s| s.1), "cabia na tela");
+        // tela pequena: quem não cabe vai para fora dela, ainda sem sobrepor
+        let tight = check(&wants, rect(200.0, 140.0));
+        assert!(tight.iter().any(|s| !s.1));
         // quem chega depois não move quem já estava
-        assert_eq!(spread(&wants[..5], (300.0, 220.0), 30.0), at[..5]);
+        assert_eq!(check(&wants[..5], rect(200.0, 140.0)), tight[..5]);
+    }
+
+    #[test]
+    fn glide_orbits_and_arrives() {
+        let (mut at, to) = (egui::vec2(100.0, 0.0), egui::vec2(-100.0, 1.0));
+        for _ in 0..60 {
+            at = glide(at, to, 0.2);
+            assert!(at.length() > 99.0, "cortou pelo centro: {at:?}");
+        }
+        assert_eq!(at, to);
     }
 }

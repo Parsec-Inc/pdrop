@@ -192,6 +192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|v| (*v as usize) < VIEWS.len())
                     .unwrap_or(0),
                 cols: 1,
+                search: None,
+                pan: Default::default(),
+                cam_key: None,
+                pan_now: Default::default(),
+                drawn: Default::default(),
                 more: false,
             }))
         }),

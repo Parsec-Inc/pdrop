@@ -65,6 +65,7 @@ pub fn send(to: Peer, me: Who, inputs: Vec<String>, tx: Sender<Msg>) {
                 };
                 if kind == 't' {
                     t.label = "mensagem".into();
+                    t.src = t.src.trim().to_string(); // o mesmo texto que vai pela rede
                 }
                 (t.size, t.kind) = (size, kind);
                 tx.send(Msg::Start(t.clone())).ok();
