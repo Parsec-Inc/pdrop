@@ -1,0 +1,164 @@
+#!/usr/bin/python3 -I
+"""Publica o pdrop-relay pelo Dokploy, a partir da main.
+
+Fica no servidor do relay, em /usr/local/bin, e é o comando forçado da chave SSH que o
+workflow deploy-relay usa: o que o cliente pedir é ignorado. O deploy não atualiza este
+arquivo; mudou aqui, copie de novo para o servidor.
+
+A saída vai para o log do GitHub Actions, que é público: nunca imprima uma resposta da API,
+que traz variáveis de ambiente e outros dados do servidor.
+
+Com --check (só no próprio servidor), confere a chave e não muda nada.
+"""
+
+import fcntl
+import json
+import secrets
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = "http://127.0.0.1:3000/api/"
+KEY_FILE = "/etc/pdrop-deploy/dokploy.key"
+APP_FILE = "/etc/pdrop-deploy/application-id"
+BRANCH = "main"
+DOCKERFILE = (
+    "https://api.github.com/repos/Parsec-Inc/pdrop/contents/"
+    "packaging/relay/Dockerfile?ref=" + BRANCH
+)
+RELAY = ("127.0.0.1", 4443)
+BUILD_LIMIT = 8 * 60
+# o limite padrão de uma chave do Dokploy é de 10 pedidos por minuto
+POLL = 12
+# o Dokploy marca "done" ao pedir a troca do contêiner, que ainda leva alguns segundos
+SETTLE = 20
+
+
+class Failed(Exception):
+    pass
+
+
+def say(text):
+    print(text, flush=True)
+
+
+def call(key, path, body=None):
+    name = path.split("?")[0]
+    for _ in range(6):
+        request = urllib.request.Request(
+            API + path,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"x-api-key": key, "content-type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as answer:
+                text = answer.read()
+            return json.loads(text) if text else None
+        except urllib.error.HTTPError as e:
+            if e.code != 429:
+                raise Failed(f"o Dokploy respondeu HTTP {e.code} em {name}") from None
+            time.sleep(20)
+        except (OSError, ValueError) as e:
+            raise Failed(f"falha ao falar com o Dokploy em {name}: {type(e).__name__}") from None
+    raise Failed(f"o Dokploy continua limitando os pedidos em {name}")
+
+
+def branch_is_ready():
+    try:
+        with urllib.request.urlopen(DOCKERFILE, timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise Failed(f"o GitHub respondeu HTTP {e.code}") from None
+    except OSError as e:
+        raise Failed(f"não consegui consultar o GitHub: {type(e).__name__}") from None
+
+
+def relay_answers():
+    """entra numa sala descartável: só um relay no ar responde OK"""
+    hello = f"HELLO {secrets.token_hex(32)} 1 1\n".encode()
+    for _ in range(12):
+        try:
+            with socket.create_connection(RELAY, timeout=5) as s:
+                s.sendall(hello)
+                with s.makefile("rb") as answer:
+                    if answer.readline(8) == b"OK\n":
+                        return True
+        except OSError:
+            pass
+        time.sleep(5)
+    return False
+
+
+def deploy(key, app, check):
+    one = f"application.one?applicationId={app}"
+    branch = call(key, one)["customGitBranch"]
+    say(f"o Dokploy aceitou a chave; branch atual: {branch}")
+    if check:
+        return
+    if not branch_is_ready():
+        raise Failed(f"a {BRANCH} ainda não tem o Dockerfile do relay; nada foi alterado")
+    if branch != BRANCH:
+        call(key, "application.update", {"applicationId": app, "customGitBranch": BRANCH})
+        if call(key, one)["customGitBranch"] != BRANCH:
+            raise Failed(f"não consegui apontar o Dokploy para a {BRANCH}")
+        say(f"Dokploy apontado para a {BRANCH}")
+
+    history = f"deployment.all?applicationId={app}"
+    before = {d["deploymentId"] for d in call(key, history)}
+    call(key, "application.deploy", {"applicationId": app})
+    say("deploy pedido; aguardando o build")
+    end = time.monotonic() + BUILD_LIMIT
+    while True:
+        if time.monotonic() > end:
+            raise Failed("o build não terminou a tempo; confira o painel do Dokploy")
+        time.sleep(POLL)
+        new = [d["status"] for d in call(key, history) if d["deploymentId"] not in before]
+        if "error" in new or "cancelled" in new:
+            raise Failed("o deploy falhou; o log do build está no painel do Dokploy")
+        if "done" in new:
+            break
+
+    say("build concluído; conferindo o relay")
+    time.sleep(SETTLE)
+    if not relay_answers():
+        raise Failed("o relay não respondeu depois do deploy")
+    say("relay no ar")
+
+
+def read(path, what):
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+    except OSError:
+        value = ""
+    if not value:
+        raise Failed(f"falta {what} no servidor ({path})")
+    return value
+
+
+def main():
+    check = sys.argv[1:] == ["--check"]
+    try:
+        key = read(KEY_FILE, "a chave do Dokploy")
+        app = read(APP_FILE, "o id da aplicação")
+        with open(APP_FILE) as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Failed("já há um deploy em andamento") from None
+            deploy(key, app, check)
+    except Failed as e:
+        say(f"erro: {e}")
+        return 1
+    except (KeyError, TypeError):
+        say("erro: resposta inesperada do Dokploy")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
