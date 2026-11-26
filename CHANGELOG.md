@@ -1,3 +1,10 @@
+## v2.0.1 (2026-11-26)
+
+### Fix
+
+- windows recipient file escape
+- firwall configuration
+
 ## v2.0.0 (2026-11-26)
 
 ### BREAKING CHANGE
