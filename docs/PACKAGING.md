@@ -48,7 +48,7 @@ copia. Quem decide é o usuário.
 
 Os pacotes de Linux trazem o serviço `pdrop` do firewalld (`/usr/lib/firewalld/services/pdrop.xml`)
 e o perfil `pdrop` do ufw (`/etc/ufw/applications.d/pdrop`), com UDP 47474 (descoberta) e TCP 47475
-(transferência). Eles não ficam ativos sozinhos: `sudo firewall-cmd --permanent --add-service=pdrop`
+(transferência). Eles não ficam ativos sozinhos: `sudo firewall-cmd --reload && sudo firewall-cmd --permanent --add-service=pdrop && sudo firewall-cmd --reload`
 ou `sudo ufw allow pdrop`. Se a porta 47475 estiver ocupada, o pdrop usa uma porta aleatória, que
 essas regras não cobrem.
 

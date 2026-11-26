@@ -52,7 +52,7 @@ fn check() -> Option<Warning> {
             return None;
         }
         let fix = if std::path::Path::new("/usr/lib/firewalld/services/pdrop.xml").exists() {
-            "sudo firewall-cmd --permanent --add-service=pdrop && sudo firewall-cmd --reload"
+            "sudo firewall-cmd --reload && sudo firewall-cmd --permanent --add-service=pdrop && sudo firewall-cmd --reload"
                 .to_string()
         } else {
             format!(
