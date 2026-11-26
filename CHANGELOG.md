@@ -1,3 +1,11 @@
+## v2.0.2 (2026-11-26)
+
+### Fix
+
+- **ui**: map search
+- **ui**: navigate, search and animate the peer map
+- **desktop.rs**: commom desktop issues
+
 ## v2.0.1 (2026-11-26)
 
 ### Fix

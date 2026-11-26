@@ -3,7 +3,7 @@
 %global debug_package %{nil}
 
 Name:           pdrop
-Version:        2.0.1
+Version:        2.0.2
 Release:        1%{?dist}
 Summary:        AirDrop-style sharing of files, text and clipboard on your local network
 License:        MIT
