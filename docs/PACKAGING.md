@@ -42,9 +42,10 @@ escolha o incremento. Os commits precisam seguir o Conventional Commits (`feat:`
 
 ## Firewall
 
-Os pacotes não mexem no firewall. O pdrop confere sozinho (firewalld, ufw, Firewall do Windows e
+Os pacotes não mexem no firewall. O pdrop confere sozinho (ufw, Firewall do Windows e
 do macOS) e, se algo parece bloquear, mostra uma faixa no topo com o comando para liberar; clicar
-copia. Quem decide é o usuário.
+copia. O firewalld exige senha de administrador até para ler as regras, então o pdrop não as lê:
+só avisa se ele estiver ativo e nenhum aparelho aparecer em 20 s. Quem decide é o usuário.
 
 Os pacotes de Linux trazem o serviço `pdrop` do firewalld (`/usr/lib/firewalld/services/pdrop.xml`)
 e o perfil `pdrop` do ufw (`/etc/ufw/applications.d/pdrop`), com UDP 47474 (descoberta) e TCP 47475

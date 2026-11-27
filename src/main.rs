@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_start,
     );
 
-    let firewall = firewall::watch();
+    let firewall = firewall::watch(peers.clone());
 
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
