@@ -859,6 +859,7 @@ mod tests {
         let (addr, _) = start();
         let room = "a".repeat(64);
         let mut d = conn(addr, &format!("DROP {room} 7 3"));
+        d.write_all(b"abc").unwrap();
         assert_eq!(read_line(&mut d).unwrap(), "ERR sem-armazenamento");
     }
 }
