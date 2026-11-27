@@ -1,6 +1,6 @@
 [package]
 name = "pdrop"
-version = "2.0.2"
+version = "2.1.0"
 edition = "2024"
 default-run = "pdrop"
 description = "AirDrop-style sharing of files, text and clipboard on your local network"

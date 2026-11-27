@@ -1,6 +1,6 @@
 name: pdrop
 base: core24
-version: '2.0.2'
+version: '2.1.0'
 summary: AirDrop-style sharing on your local network
 description: |
   Run pdrop on two or more machines on the same network and they appear on

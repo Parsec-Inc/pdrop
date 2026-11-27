@@ -1,3 +1,14 @@
+## v2.1.0 (2026-11-27)
+
+### Feat
+
+- **board**: message board and relay offline queue
+
+### Fix
+
+- **ci**: update Cargo.lock and fix main build after message board merge
+- **firewall**: stop prompting for admin password on firewalld
+
 ## v2.0.2 (2026-11-26)
 
 ### Fix
