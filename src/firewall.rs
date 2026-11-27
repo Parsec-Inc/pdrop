@@ -1,9 +1,9 @@
-use crate::clip::quiet;
+use crate::{clip::quiet, net::Peers};
 use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, PartialEq)]
@@ -15,13 +15,16 @@ pub struct Warning {
 pub type Shared = Arc<Mutex<Option<Warning>>>;
 
 const RECHECK: Duration = Duration::from_secs(30);
+const GRACE: Duration = Duration::from_secs(20);
 
-pub fn watch() -> Shared {
+pub fn watch(peers: Peers) -> Shared {
     let shared = Shared::default();
     let out = shared.clone();
+    let started = Instant::now();
     thread::spawn(move || {
         loop {
-            *out.lock().unwrap() = check();
+            let lonely = started.elapsed() >= GRACE && peers.lock().unwrap().is_empty();
+            *out.lock().unwrap() = check(lonely);
             thread::sleep(RECHECK);
         }
     });
@@ -41,14 +44,10 @@ fn run(cmd: &str, args: &[&str]) -> Option<(bool, String)> {
 }
 
 #[cfg(target_os = "linux")]
-fn check() -> Option<Warning> {
+fn check(lonely: bool) -> Option<Warning> {
     use crate::net::{DISCOVERY_PORT, TRANSFER_PORT};
     if run("firewall-cmd", &["--state"]).is_some_and(|(ok, _)| ok) {
-        let open = |arg: String| run("firewall-cmd", &[&arg]).is_some_and(|(ok, _)| ok);
-        if open("--query-service=pdrop".into())
-            || (open(format!("--query-port={DISCOVERY_PORT}/udp"))
-                && open(format!("--query-port={TRANSFER_PORT}/tcp")))
-        {
+        if !lonely {
             return None;
         }
         let fix = if std::path::Path::new("/usr/lib/firewalld/services/pdrop.xml").exists() {
@@ -60,7 +59,7 @@ fn check() -> Option<Warning> {
             )
         };
         return Some(Warning {
-            text: "o firewalld está bloqueando o pdrop".into(),
+            text: "o firewalld pode estar bloqueando o pdrop (nenhum aparelho encontrado)".into(),
             fix,
         });
     }
@@ -93,7 +92,7 @@ fn block_query(exe: &std::path::Path) -> String {
 }
 
 #[cfg(windows)]
-fn check() -> Option<Warning> {
+fn check(_lonely: bool) -> Option<Warning> {
     let exe = std::env::current_exe().ok()?;
     let (_, out) = run(
         "powershell",
@@ -120,7 +119,7 @@ fn app_blocked(out: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn check() -> Option<Warning> {
+fn check(_lonely: bool) -> Option<Warning> {
     let exe = std::env::current_exe().ok()?;
     let on = run(FW, &["--getglobalstate"]).is_some_and(|(_, out)| out.contains("enabled"));
     let blocked = on
@@ -133,7 +132,7 @@ fn check() -> Option<Warning> {
 }
 
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-fn check() -> Option<Warning> {
+fn check(_lonely: bool) -> Option<Warning> {
     None
 }
 
@@ -157,7 +156,7 @@ mod tests {
     #[test]
     fn check_finishes_on_this_computer() {
         let started = std::time::Instant::now();
-        if let Some(w) = check() {
+        if let Some(w) = check(true) {
             assert!(!w.text.is_empty() && !w.fix.is_empty());
         }
         assert!(started.elapsed() < Duration::from_secs(30));
