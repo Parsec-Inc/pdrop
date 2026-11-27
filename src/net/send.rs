@@ -1,9 +1,9 @@
 use super::{
     HashRead, MAX_FILES, MAX_TEXT, Msg, Peer, Route, State, TRANSFER_PORT, Transfer, Who, bad,
-    next_id, preview, pump,
+    next_id, offline::queue, preview, pump,
 };
 use crate::{
-    clip, relay,
+    clip, contacts, relay,
     secure::{self, Secure},
 };
 use std::{
@@ -70,22 +70,27 @@ pub fn send(to: Peer, me: Who, inputs: Vec<String>, tx: Sender<Msg>) {
                 (t.size, t.kind) = (size, kind);
                 tx.send(Msg::Start(t.clone())).ok();
                 let r = match job {
-                    Job::Text(b) => open(&to, &me, 't', size, "mensagem", "").and_then(|mut s| {
-                        pump(&mut Cursor::new(b), &mut s, id, 0, size, &tx).map(|_| ())
-                    }),
+                    Job::Text(b) => send_text(&to, &me, b, id, &tx),
                     Job::Files(label, es) => {
                         open(&to, &me, 'f', size, &label, &es.len().to_string())
                             .and_then(|s| send_files(s, &es, id, size, &tx))
+                            .map(|_| "enviado".to_string())
                     }
                 };
-                tx.send(Msg::End(
-                    id,
-                    r.map(|_| "enviado".to_string()).map_err(|e| e.to_string()),
-                ))
-                .ok();
+                tx.send(Msg::End(id, r.map_err(|e| e.to_string()))).ok();
             }
         }
     });
+}
+
+fn send_text(to: &Peer, me: &Who, b: Vec<u8>, id: u64, tx: &Sender<Msg>) -> io::Result<String> {
+    let size = b.len() as u64;
+    match connect(to, &me.key) {
+        Ok(s) => offer(s, me, 't', size, "mensagem", "")
+            .and_then(|mut s| pump(&mut Cursor::new(b), &mut s, id, 0, size, tx))
+            .map(|_| "enviado".to_string()),
+        Err(e) => queue(to, me, &b).unwrap_or(Err(e)),
+    }
 }
 
 pub fn push_clip(
@@ -226,6 +231,7 @@ fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
             ));
         }
         s.tcp().set_read_timeout(Some(Duration::from_secs(60)))?;
+        contacts::learn(s.remote_key);
         Ok(s)
     };
     let via_relay = |cfg: &relay::Config| {
@@ -256,7 +262,17 @@ fn connect(to: &Peer, key: &[u8; 32]) -> io::Result<Secure> {
 }
 
 fn open(to: &Peer, me: &Who, kind: char, size: u64, name: &str, extra: &str) -> io::Result<Secure> {
-    let mut s = connect(to, &me.key)?;
+    offer(connect(to, &me.key)?, me, kind, size, name, extra)
+}
+
+fn offer(
+    mut s: Secure,
+    me: &Who,
+    kind: char,
+    size: u64,
+    name: &str,
+    extra: &str,
+) -> io::Result<Secure> {
     let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
     writeln!(
         s,

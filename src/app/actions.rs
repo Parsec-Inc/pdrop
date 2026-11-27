@@ -81,6 +81,12 @@ impl App {
             Some(0)
         };
         self.clip_sel = None;
+        self.board = false;
+    }
+
+    pub(crate) fn toggle_board(&mut self) {
+        self.board = !self.board;
+        (self.hist_sel, self.clip_sel) = (None, None);
     }
 
     pub(crate) fn toggle_clips(&mut self) {
@@ -90,6 +96,7 @@ impl App {
             Some(0)
         };
         self.hist_sel = None;
+        self.board = false;
     }
 
     pub(crate) fn clip_step(&mut self, d: isize) {

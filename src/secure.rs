@@ -5,6 +5,8 @@ use std::{
 };
 
 const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+const SEALED: &str = "Noise_X_25519_ChaChaPoly_BLAKE2s";
+pub const SEAL_MAX: usize = 16 * 1024;
 const CHUNK: usize = 65000;
 
 fn err(e: impl std::fmt::Display) -> io::Error {
@@ -53,6 +55,7 @@ pub struct Secure {
     rbuf: Vec<u8>,
     rpos: usize,
     pub remote: u128,
+    pub remote_key: [u8; 32],
 }
 
 impl Secure {
@@ -81,17 +84,54 @@ pub fn handshake(mut tcp: TcpStream, key: &[u8; 32], initiator: bool) -> io::Res
             hs.read_message(&f, &mut buf).map_err(err)?;
         }
     }
-    let remote = id_of(
-        hs.get_remote_static()
-            .ok_or_else(|| err("sem identidade"))?,
-    );
+    let remote_key: [u8; 32] = hs
+        .get_remote_static()
+        .ok_or_else(|| err("sem identidade"))?
+        .try_into()
+        .map_err(|_| err("chave inválida"))?;
+    let remote = id_of(&remote_key);
     Ok(Secure {
         tcp,
         ts: hs.into_transport_mode().map_err(err)?,
         rbuf: vec![],
         rpos: 0,
         remote,
+        remote_key,
     })
+}
+
+pub fn seal(my_key: &[u8; 32], their_public: &[u8; 32], msg: &[u8]) -> io::Result<Vec<u8>> {
+    if msg.len() > SEAL_MAX {
+        return Err(err("mensagem grande demais"));
+    }
+    let mut hs = Builder::new(SEALED.parse().unwrap())
+        .local_private_key(my_key)
+        .map_err(err)?
+        .remote_public_key(their_public)
+        .map_err(err)?
+        .build_initiator()
+        .map_err(err)?;
+    let mut out = vec![0u8; msg.len() + 256];
+    let n = hs.write_message(msg, &mut out).map_err(err)?;
+    out.truncate(n);
+    Ok(out)
+}
+
+pub fn open(my_key: &[u8; 32], blob: &[u8]) -> io::Result<([u8; 32], Vec<u8>)> {
+    let mut hs = Builder::new(SEALED.parse().unwrap())
+        .local_private_key(my_key)
+        .map_err(err)?
+        .build_responder()
+        .map_err(err)?;
+    let mut out = vec![0u8; blob.len()];
+    let n = hs.read_message(blob, &mut out).map_err(err)?;
+    out.truncate(n);
+    let from = hs
+        .get_remote_static()
+        .ok_or_else(|| err("sem identidade"))?
+        .try_into()
+        .map_err(|_| err("chave inválida"))?;
+    Ok((from, out))
 }
 
 impl Read for Secure {
@@ -149,5 +189,17 @@ mod tests {
         let (remote, got) = srv.join().unwrap();
         assert_eq!((remote, got), (id_of(&pa), data));
         assert_eq!(code(1, 2), code(2, 1));
+    }
+
+    #[test]
+    fn sealed_message_is_for_one_recipient_and_names_the_sender() {
+        let ((ka, pa), (kb, pb), (kc, _)) = (generate(), generate(), generate());
+        let blob = seal(&ka, &pb, "olá".as_bytes()).unwrap();
+        assert_eq!(open(&kb, &blob).unwrap(), (pa, "olá".as_bytes().to_vec()));
+        assert!(open(&kc, &blob).is_err());
+        let mut tampered = blob.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(open(&kb, &tampered).is_err());
+        assert!(seal(&ka, &pb, &[0u8; SEAL_MAX + 1]).is_err());
     }
 }

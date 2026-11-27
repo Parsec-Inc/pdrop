@@ -121,6 +121,7 @@ fn cli_run(
                 name: Arc::new(Mutex::new(me.clone())),
                 color: Arc::new(AtomicU8::new(0)),
                 policy,
+                offline: None,
             },
             peers.clone(),
             Arc::new(|_| {}),

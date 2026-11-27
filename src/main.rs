@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod clip;
 mod config;
+mod contacts;
 mod desktop;
 mod firewall;
 mod fmt;
@@ -123,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: shared_name.clone(),
             color: shared_color.clone(),
             policy: policy.clone(),
+            offline: Some(net::inbox(tx.clone(), policy.clone())),
         },
         peers.clone(),
         incoming,
@@ -183,6 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hist_sel: None,
                 clips: VecDeque::new(),
                 clip_sel: None,
+                board: false,
+                known: Default::default(),
                 marked: Default::default(),
                 firewall,
                 relay,

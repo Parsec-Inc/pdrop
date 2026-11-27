@@ -55,6 +55,8 @@ pub struct App {
     pub hist_sel: Option<usize>,
     pub clips: VecDeque<(String, clip::Clip)>,
     pub clip_sel: Option<usize>,
+    pub board: bool,
+    pub known: std::collections::HashMap<u64, Peer>,
     pub marked: std::collections::HashSet<u64>,
     pub view: u8,
     pub cols: usize,
@@ -81,11 +83,15 @@ impl App {
             .cloned()
             .collect();
         if t.is_empty() {
-            peers
+            let live: Vec<Peer> = peers
                 .iter()
                 .filter(|p| Some(p.id) == self.sel)
                 .cloned()
-                .collect()
+                .collect();
+            match self.sel.and_then(|id| self.known.get(&id)) {
+                Some(p) if live.is_empty() && self.board => vec![p.clone()],
+                _ => live,
+            }
         } else {
             t
         }
@@ -187,7 +193,11 @@ impl App {
                         up: t.up,
                         kind: t.kind,
                         peer: t.peer.clone(),
-                        label: t.label.clone(),
+                        label: if t.up && r.as_deref() == Ok("na fila do relay") {
+                            "mensagem · na fila".into()
+                        } else {
+                            t.label.clone()
+                        },
                         size: t.size,
                         ok: r.is_ok(),
                         detail: if t.up {
@@ -195,6 +205,7 @@ impl App {
                         } else {
                             r.clone().unwrap_or_default()
                         },
+                        uid: t.uid,
                     };
                     t.state = match r {
                         Ok(m) if !t.up && t.kind == 'f' && m.lines().count() > 1 => {
@@ -247,7 +258,16 @@ impl App {
             self.stop_bridge();
             self.flash("ponte encerrada: o aparelho saiu do radar");
         }
-        if !peers.iter().any(|p| Some(p.id) == self.sel) {
+        for p in peers.iter().filter(|p| p.via_relay() || p.fallback.is_some()) {
+            self.known.insert(p.id, p.clone());
+        }
+        if self.known.len() > 64 {
+            self.known.retain(|id, _| peers.iter().any(|p| p.id == *id));
+        }
+        let kept = self.sel.is_some_and(|id| {
+            peers.iter().any(|p| p.id == id) || (self.board && self.known.contains_key(&id))
+        });
+        if !kept {
             self.sel = peers.first().map(|p| p.id);
         }
         peers

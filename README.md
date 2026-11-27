@@ -41,6 +41,7 @@ Run `pdrop` on two or more machines on the same network and they appear as blips
 - **Send files** — type or paste a path (or drag files and folders onto the window; `~`, quotes, and `file://` URLs are cleaned up automatically).
 - **Folders and many files** — type a folder path or drop several files/folders at once: one transfer, one accept. Empty folders and symlinks are skipped.
 - **Resume + integrity** — every file is checked with a BLAKE3 hash on arrival. If the connection drops, send it again and it continues where it stopped (partials live in `~/Downloads/.pdrop-partial`, swept after 7 days). Corrupted files are rejected.
+- **Message board** (`j`) — the text you sent and received with the selected peer, shown as a conversation (the message itself, not just "ok").
 - **History** (`g`) — everything sent and received is kept (last 200) in `~/.config/pdrop/historico`. `↑/↓` browse, `enter` shows the file in your file manager, `e` sends it again to the selected peer.
 - **Trusted devices** (`t`) — mark the selected peer as trusted and their *text messages* arrive without a prompt (files, clipboard and bridges still ask). Trust follows the device's cryptographic identity, not its display name. Trusted peers are marked with `*` on the radar.
 - **Encryption + pairing** — every transfer runs inside a Noise XX channel (X25519, ChaChaPoly, BLAKE2s). Each device has a key pair in `~/.config/pdrop/chave` (owner-only); its uid is the hash of the public key, so it can't be impersonated. Select a peer and both screens show the same 4-digit code (`código 1234`) derived from the two identities: compare it out loud before pressing `t`. If someone is in the middle, the codes differ and a changed identity is refused outright.
@@ -168,6 +169,7 @@ With no valid arguments, it prints the usage line. Everything else is done insid
 | `a` / `shift+a` | Mark the selected peer / mark everyone (send goes to all marked) |
 | `p` | Open the received-clipboard history (`↑/↓`, `enter` to restore) |
 | `g` | Open or close the history (`↑/↓` browse, `enter` show in folder, `e` resend) |
+| `j` | Open or close the message board: the conversation (sent and received text) with the selected peer |
 | `y` / `n` | Accept / refuse an incoming transfer or bridge request |
 | `f` | Search a peer by name (`↑/↓` cycle matches, `enter` close); the radar and constellation move to it |
 | `w` | Open or close the relay screen (also the *Relay* button) |
@@ -235,6 +237,8 @@ cargo build --release --bin pdrop-relay
 pdrop-relay --listen 0.0.0.0:443     # default
 ```
 
+**Offline messages (optional).** Built with `--features store` (`cargo build --release --bin pdrop-relay --features store`, needs a C compiler) and started with `--db FILE`, the relay keeps text messages for devices that are offline, in a small SQLite file. The sender seals the text to the recipient's public key (Noise `X`), so the relay stores only ciphertext, the room and the recipient's uid; the recipient fetches it when it connects, and the relay deletes it after the acknowledgement. Up to 16 KiB per message, 200 waiting per device, 20,000 in total, kept 7 days. This works for devices you have already exchanged something with (their public key is remembered in `~/.config/pdrop/chaves`). Without `--features store` or `--db`, the relay answers that it keeps nothing and pdrop says so.
+
 ### Connecting to a relay
 
 Every device needs the same relay address and the same password (the room secret). It needs at least 16 characters, but length alone does not make it strong, so prefer a generated one.
@@ -257,10 +261,13 @@ An invalid flag stops pdrop; an invalid saved or environment value only disables
 | `BEACON <uid> <text>`, `GONE <uid>`, `INCOMING <token>` | Relay → client: presence of another member, a member left, someone wants to connect. |
 | `DIAL <room> <target_uid>` | New connection asking for a tunnel to a member. `OK` (raw bytes follow) or `ERR`. |
 | `ACCEPT <room> <uid> <token>` | The target's answer to `INCOMING`, on a new connection. `OK`, then the same tunnel. |
+| `DROP <room> <to_uid> <len>` + `len` bytes | New connection: queue a sealed message for a device (needs `--db`). `OK`, or `ERR sem-armazenamento` / `ERR cheia` / `ERR tamanho`. The recipient, if connected, gets `NEW`. |
+| `FETCH <room> <uid> <key>` | New connection, same `key` as `HELLO` and the device must be connected. Answers `MSG <id> <len>` + bytes for each waiting message, then `END`; the client then sends `ACK <id>` lines and closes. Anything else: `ERR`. |
 
 **Limits** — 2048 connections in total; per IP, 32 control connections, 32 tunnel connections, 32 still waiting to send their first line, and 8 rooms; 32 members per room, 1024 rooms; per minute and per IP, 30 control requests (`HELLO`) and 120 tunnel requests (`DIAL`, `ACCEPT`), with at most 10,000 entries tracked; 10 s for the first request line, 10 s for the target to accept, 120 s without traffic closes a tunnel. Presence messages for a member that reads too slowly are dropped. Room ids are never logged.
 
 **Known shortcuts**
+- Offline messages: anyone who knows the room can queue to any uid, up to the caps, and so fill a device's queue. Only the connected owner of a uid (same membership key) can fetch or acknowledge its messages. Whoever runs the relay can replay a stored message, so the recipient may see it twice. There is no delivery receipt back to the sender.
 - The relay cannot verify that a uid belongs to whoever joins with it. The membership key stops other members from replacing a connected device, but one that joins with an offline device's uid keeps it out until it leaves. Transfers cannot be hijacked: the Noise handshake checks the uid.
 - The room and per-IP limits only raise the cost of filling the relay; someone with many addresses still can. Anyone who can reach it can create rooms.
 - Behind a shared NAT, users split the per-IP limits.

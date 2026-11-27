@@ -16,6 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_LINE: u64 = 1024;
+const MAX_BLOB: usize = 64 * 1024;
 
 pub struct Config {
     pub addr: String,
@@ -56,6 +57,7 @@ pub struct Me {
     pub name: Arc<Mutex<String>>,
     pub color: Arc<AtomicU8>,
     pub policy: Arc<Policy>,
+    pub offline: Option<Offline>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +71,8 @@ pub enum Link {
 pub type Status = Arc<Mutex<Link>>;
 
 pub type Incoming = Arc<dyn Fn(TcpStream) + Send + Sync>;
+
+pub type Offline = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
 pub fn room_of(secret: &str) -> String {
     blake3::hash(secret.trim().as_bytes()).to_hex().to_string()
@@ -264,6 +268,8 @@ fn session(
         Err(e) => return e,
     };
     let stop = Arc::new(AtomicBool::new(false));
+    let inbox = Arc::new(Inbox::default());
+    poke(&inbox, cfg, me);
     let (me2, stop2) = (me.clone(), stop.clone());
     let writer = thread::spawn(move || {
         while !stop2.load(Ordering::Relaxed) {
@@ -283,6 +289,7 @@ fn session(
                 }
                 match l.strip_prefix("INCOMING ") {
                     Some(token) => answer(token, cfg, me.uid, incoming),
+                    None if l == "NEW" => poke(&inbox, cfg, me),
                     None => handle(&l, cfg, me, peers),
                 }
             }
@@ -294,6 +301,77 @@ fn session(
     writer.thread().unpark();
     let _ = writer.join();
     error
+}
+
+#[derive(Default)]
+struct Inbox {
+    running: AtomicBool,
+    again: AtomicBool,
+}
+
+fn poke(inbox: &Arc<Inbox>, cfg: &Arc<Config>, me: &Me) {
+    let Some(deliver) = me.offline.clone() else {
+        return;
+    };
+    inbox.again.store(true, Ordering::SeqCst);
+    if inbox.running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (inbox, cfg, me) = (inbox.clone(), cfg.clone(), me.clone());
+    thread::spawn(move || {
+        while inbox.again.swap(false, Ordering::SeqCst) {
+            if let Err(e) = pull(&cfg, &me, &deliver) {
+                eprintln!("relay: não consegui buscar mensagens na fila: {e}");
+                break;
+            }
+        }
+        inbox.running.store(false, Ordering::SeqCst);
+    });
+}
+
+fn pull(cfg: &Config, me: &Me, deliver: &(dyn Fn(Vec<u8>) + Send + Sync)) -> io::Result<()> {
+    let mut s = dial_tcp(&cfg.addr)?;
+    s.set_read_timeout(Some(TUNNEL_TIMEOUT))?;
+    s.set_write_timeout(Some(TIMEOUT))?;
+    let key = membership_key(&me.policy.key, &cfg.room);
+    s.write_all(format!("FETCH {} {:x} {key:x}\n", cfg.room, me.uid).as_bytes())?;
+    let mut r = BufReader::new(s);
+    let mut ids = Vec::new();
+    loop {
+        let l = read_line(&mut r)?;
+        if l == "END" || l.starts_with("ERR") {
+            break;
+        }
+        let (id, len) = l
+            .strip_prefix("MSG ")
+            .and_then(|l| l.split_once(' '))
+            .and_then(|(i, n)| Some((i.parse::<i64>().ok()?, n.parse::<usize>().ok()?)))
+            .filter(|(_, n)| *n <= MAX_BLOB)
+            .ok_or_else(|| io::Error::other("resposta inválida do relay"))?;
+        let mut blob = vec![0u8; len];
+        r.read_exact(&mut blob)?;
+        deliver(blob);
+        ids.push(id);
+    }
+    for id in ids {
+        r.get_mut().write_all(format!("ACK {id}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+pub fn drop_msg(cfg: &Config, to: u128, blob: &[u8]) -> io::Result<()> {
+    let mut s = dial_tcp(&cfg.addr)?;
+    s.set_read_timeout(Some(TUNNEL_TIMEOUT))?;
+    s.set_write_timeout(Some(TIMEOUT))?;
+    s.write_all(format!("DROP {} {to:x} {}\n", cfg.room, blob.len()).as_bytes())?;
+    s.write_all(blob)?;
+    let mut r = BufReader::new(s);
+    match read_line(&mut r)?.as_str() {
+        "OK" => Ok(()),
+        "ERR sem-armazenamento" => Err(io::Error::other("o relay não guarda mensagens")),
+        "ERR cheia" => Err(io::Error::other("a fila desse aparelho no relay está cheia")),
+        _ => Err(io::Error::other("o relay recusou a mensagem")),
+    }
 }
 
 fn answer(token: &str, cfg: &Arc<Config>, uid: u128, incoming: &Incoming) {
@@ -405,6 +483,7 @@ mod tests {
                 vis: AtomicU8::new(vis),
                 ..Default::default()
             }),
+            offline: None,
         }
     }
 
