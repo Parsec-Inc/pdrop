@@ -1,8 +1,10 @@
 mod discovery;
+mod offline;
 mod recv;
 mod send;
 
 pub use discovery::{discover, shown, upsert};
+pub use offline::inbox;
 pub use recv::{listen, recv};
 pub use send::{bridge, push_clip, send};
 

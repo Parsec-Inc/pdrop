@@ -41,6 +41,7 @@ Abra o `pdrop` em duas ou mais máquinas na mesma rede e elas aparecem como pont
 - **Enviar arquivos** — digite ou cole um caminho (ou arraste arquivos e pastas para a janela; `~`, aspas e URLs `file://` são tratados automaticamente).
 - **Pastas e vários arquivos** — digite o caminho de uma pasta ou solte vários arquivos/pastas de uma vez: uma transferência, um aceite. Pastas vazias e links simbólicos são ignorados.
 - **Retomada e integridade** — cada arquivo é conferido com um hash BLAKE3 ao chegar. Se a conexão cair, envie de novo e ele continua de onde parou (os pedaços ficam em `~/Downloads/.pdrop-partial`, apagados após 7 dias). Arquivos corrompidos são rejeitados.
+- **Mural de mensagens** (`j`) — o texto que você enviou e recebeu com o peer selecionado, em formato de conversa (a mensagem em si, não só "ok").
 - **Histórico** (`g`) — tudo o que foi enviado e recebido fica guardado (os últimos 200) em `~/.config/pdrop/historico`. `↑/↓` navegam, `enter` mostra o arquivo no gerenciador de arquivos, `e` envia de novo para o peer selecionado.
 - **Aparelhos confiáveis** (`t`) — marque o peer selecionado como confiável e as *mensagens de texto* dele chegam sem pedir aceite (arquivos, clipboard e pontes continuam perguntando). A confiança segue a identidade criptográfica do aparelho, não o nome exibido. Peers confiáveis aparecem com `*` no radar.
 - **Criptografia e pareamento** — toda transferência roda dentro de um canal Noise XX (X25519, ChaChaPoly, BLAKE2s). Cada aparelho tem um par de chaves em `~/.config/pdrop/chave` (só o dono lê); o uid é o hash da chave pública, então não dá para se passar por outro aparelho. Ao selecionar um peer, as duas telas mostram o mesmo código de 4 dígitos (`código 1234`), derivado das duas identidades: confira de voz antes de apertar `t`. Se alguém estiver no meio, os códigos diferem e uma identidade que mudou é recusada na hora.
@@ -168,6 +169,7 @@ Sem argumentos válidos, ele imprime a linha de uso. Todo o resto é feito dentr
 | `a` / `shift+a` | Marca o peer selecionado / marca todos (o envio vai para todos os marcados) |
 | `p` | Abre o histórico de clipboards recebidos (`↑/↓`, `enter` para restaurar) |
 | `g` | Abre ou fecha o histórico (`↑/↓` navegam, `enter` mostra na pasta, `e` reenvia) |
+| `j` | Abre ou fecha o mural de mensagens: a conversa (texto enviado e recebido) com o peer selecionado |
 | `y` / `n` | Aceita / recusa uma transferência ou pedido de ponte recebido |
 | `f` | Busca um peer pelo nome (`↑/↓` passam pelos resultados, `enter` fecha); o radar e a constelação vão até ele |
 | `w` | Abre ou fecha a tela dos relays (também pelo botão *Relay*) |
@@ -235,6 +237,8 @@ cargo build --release --bin pdrop-relay
 pdrop-relay --listen 0.0.0.0:443     # padrão
 ```
 
+**Mensagens offline (opcional).** Compilado com `--features store` (`cargo build --release --bin pdrop-relay --features store`, precisa de compilador C) e iniciado com `--db ARQUIVO`, o relay guarda mensagens de texto para aparelhos desconectados, num pequeno arquivo SQLite. Quem envia sela o texto com a chave pública do destinatário (Noise `X`), então o relay guarda só texto cifrado, a sala e o uid do destinatário; o destinatário busca ao conectar e o relay apaga depois da confirmação. Até 16 KiB por mensagem, 200 esperando por aparelho, 20.000 no total, guardadas por 7 dias. Funciona para aparelhos com quem você já trocou algo (a chave pública fica em `~/.config/pdrop/chaves`). Sem `--features store` ou sem `--db`, o relay diz que não guarda nada e o pdrop avisa.
+
 ### Conectando a um relay
 
 Todos os aparelhos precisam do mesmo endereço de relay e da mesma senha (o segredo da sala). Ela precisa de pelo menos 16 caracteres, mas só o tamanho não a torna forte, então prefira uma gerada.
@@ -257,6 +261,8 @@ Uma opção inválida encerra o pdrop; um valor salvo ou de ambiente inválido s
 | `BEACON <uid> <texto>`, `GONE <uid>`, `INCOMING <token>` | Relay → cliente: presença de outro membro, um membro saiu, alguém quer conectar. |
 | `DIAL <sala> <uid_alvo>` | Nova conexão pedindo um túnel até um membro. `OK` (daí em diante, bytes crus) ou `ERR`. |
 | `ACCEPT <sala> <uid> <token>` | Resposta do alvo ao `INCOMING`, em uma nova conexão. `OK`, e o mesmo túnel. |
+| `DROP <sala> <uid_destino> <tam>` + `tam` bytes | Nova conexão: coloca na fila uma mensagem selada para um aparelho (precisa de `--db`). `OK`, ou `ERR sem-armazenamento` / `ERR cheia` / `ERR tamanho`. Se o destinatário estiver conectado, recebe `NEW`. |
+| `FETCH <sala> <uid> <chave>` | Nova conexão, com a mesma `chave` do `HELLO`, e o aparelho precisa estar conectado. Responde `MSG <id> <tam>` + bytes para cada mensagem esperando, depois `END`; o cliente manda linhas `ACK <id>` e fecha. Qualquer outra coisa: `ERR`. |
 
 **Limites** — 2048 conexões no total; por IP, 32 conexões de controle, 32 de túnel, 32 ainda sem a primeira linha e 8 salas; 32 membros por sala, 1024 salas; por minuto e por IP, 30 requisições de controle (`HELLO`) e 120 de túnel (`DIAL`, `ACCEPT`), com no máximo 10.000 entradas acompanhadas; 10 s para a primeira linha chegar, 10 s para o alvo aceitar, 120 s sem tráfego encerra o túnel. Mensagens de presença para um membro que lê devagar demais são descartadas. Ids de sala nunca são registrados em log.
 

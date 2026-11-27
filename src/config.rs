@@ -88,11 +88,11 @@ pub fn load_identity() -> ([u8; 32], u128) {
     (k, secure::id_of(&p))
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn unhex(s: &str) -> Option<[u8; 32]> {
     let b: Vec<u8> = (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())

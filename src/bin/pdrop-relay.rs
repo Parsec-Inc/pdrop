@@ -1,3 +1,6 @@
+#[path = "../relay_store.rs"]
+mod store;
+
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
@@ -30,6 +33,7 @@ const WRITE: Duration = Duration::from_secs(5);
 const PAIR: Duration = Duration::from_secs(10);
 const IDLE: u64 = 120;
 const POLL: Duration = Duration::from_secs(5);
+const FETCH_MAX: i64 = 100;
 
 struct Member {
     tx: mpsc::SyncSender<String>,
@@ -52,6 +56,7 @@ pub struct State {
     conns: Mutex<HashMap<(IpAddr, Kind), u32>>,
     rate: Mutex<HashMap<(IpAddr, bool), (Instant, u32)>>,
     epoch: AtomicU64,
+    store: Option<store::Store>,
 }
 
 impl State {
@@ -399,6 +404,54 @@ fn accept(
     Ok(())
 }
 
+fn keep(st: &State, mut s: TcpStream, room: &str, to: u128, len: usize) -> io::Result<()> {
+    if len == 0 || len > store::MAX_BLOB {
+        return s.write_all(b"ERR tamanho\n");
+    }
+    let mut blob = vec![0u8; len];
+    Until {
+        s: &mut s,
+        end: Instant::now() + WAIT,
+    }
+    .read_exact(&mut blob)?;
+    let Some(store) = &st.store else {
+        return s.write_all(b"ERR sem-armazenamento\n");
+    };
+    match store.put(room, to, &blob) {
+        Ok(()) => {
+            if let Some(m) = st.rooms.lock().unwrap().get(room).and_then(|r| r.get(&to)) {
+                let _ = m.tx.try_send("NEW\n".into());
+            }
+            s.write_all(b"OK\n")
+        }
+        Err(why) => s.write_all(format!("ERR {why}\n").as_bytes()),
+    }
+}
+
+fn fetch(st: &State, mut s: TcpStream, room: &str, uid: u128, key: u128) -> io::Result<()> {
+    let member = st
+        .rooms
+        .lock()
+        .unwrap()
+        .get(room)
+        .and_then(|r| r.get(&uid))
+        .is_some_and(|m| m.key == key);
+    let Some(store) = st.store.as_ref().filter(|_| member) else {
+        return s.write_all(b"ERR\n");
+    };
+    for (id, blob) in store.take(room, uid, FETCH_MAX)? {
+        s.write_all(format!("MSG {id} {}\n", blob.len()).as_bytes())?;
+        s.write_all(&blob)?;
+    }
+    s.write_all(b"END\n")?;
+    while let Ok(l) = read_line_within(&mut s, WAIT) {
+        if let Some(id) = l.strip_prefix("ACK ").and_then(|i| i.parse::<i64>().ok()) {
+            store.ack(room, uid, id)?;
+        }
+    }
+    Ok(())
+}
+
 fn splice(a: TcpStream, b: TcpStream) -> io::Result<()> {
     for s in [&a, &b] {
         s.set_read_timeout(Some(POLL))?;
@@ -463,6 +516,14 @@ fn handle(st: &State, mut s: TcpStream, mut slot: Slot) -> io::Result<()> {
         ["HELLO", room, uid, key] => hello(st, s, ip, room_id(room)?, hex(uid)?, hex(key)?),
         ["DIAL", room, uid] => dial(st, s, &room_id(room)?, hex(uid)?),
         ["ACCEPT", room, uid, tok] => accept(st, s, slot, &room_id(room)?, hex(uid)?, hex(tok)?),
+        ["DROP", room, to, len] => keep(
+            st,
+            s,
+            &room_id(room)?,
+            hex(to)?,
+            len.parse().map_err(|_| bad("tamanho"))?,
+        ),
+        ["FETCH", room, uid, key] => fetch(st, s, &room_id(room)?, hex(uid)?, hex(key)?),
         _ => Err(bad("comando")),
     }
 }
@@ -486,19 +547,33 @@ pub fn serve(l: TcpListener, st: Arc<State>) {
 
 fn main() -> io::Result<()> {
     let mut addr = "0.0.0.0:443".to_string();
+    let mut db = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match (a.as_str(), args.next()) {
             ("--listen", Some(v)) => addr = v,
+            ("--db", Some(v)) => db = Some(v),
             _ => {
-                eprintln!("uso: pdrop-relay [--listen ENDERECO:PORTA]   (padrão {addr})");
+                eprintln!(
+                    "uso: pdrop-relay [--listen ENDERECO:PORTA] [--db ARQUIVO]   (padrão {addr})"
+                );
                 std::process::exit(2);
             }
         }
     }
+    let store = db.map(|p| store::Store::open(&p)).transpose()?;
     let l = TcpListener::bind(&addr)?;
-    eprintln!("pdrop-relay ouvindo em {addr}");
-    serve(l, Arc::new(State::default()));
+    eprintln!(
+        "pdrop-relay ouvindo em {addr}{}",
+        if store.is_some() { " (com fila de mensagens)" } else { "" }
+    );
+    serve(
+        l,
+        Arc::new(State {
+            store,
+            ..Default::default()
+        }),
+    );
     Ok(())
 }
 
@@ -736,5 +811,54 @@ mod tests {
 
         drop(a);
         assert_eq!(read_line(&mut b).unwrap(), "GONE 1");
+    }
+
+    #[cfg(feature = "store")]
+    #[test]
+    fn an_offline_message_waits_for_its_recipient_and_goes_after_the_ack() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let st = Arc::new(State {
+            store: Some(store::Store::open(":memory:").unwrap()),
+            ..Default::default()
+        });
+        let st2 = st.clone();
+        thread::spawn(move || serve(l, st2));
+        let room = "a".repeat(64);
+
+        let mut d = conn(addr, &format!("DROP {room} 7 3"));
+        d.write_all(b"abc").unwrap();
+        assert_eq!(read_line(&mut d).unwrap(), "OK");
+
+        let mut me = conn(addr, &format!("HELLO {room} 7 9"));
+        assert_eq!(read_line(&mut me).unwrap(), "OK");
+        let mut stranger = conn(addr, &format!("FETCH {room} 7 8"));
+        assert_eq!(read_line(&mut stranger).unwrap(), "ERR");
+
+        let mut f = conn(addr, &format!("FETCH {room} 7 9"));
+        let head = read_line(&mut f).unwrap();
+        assert!(head.starts_with("MSG ") && head.ends_with(" 3"), "{head}");
+        let id = head.split(' ').nth(1).unwrap().to_string();
+        let mut body = [0u8; 3];
+        f.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"abc");
+        assert_eq!(read_line(&mut f).unwrap(), "END");
+        writeln!(f, "ACK {id}").unwrap();
+        drop(f);
+
+        let store = st.store.as_ref().unwrap();
+        let end = Instant::now() + Duration::from_secs(3);
+        while !store.take(&room, 7, 10).unwrap().is_empty() {
+            assert!(Instant::now() < end, "a mensagem não foi apagada");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn dropping_without_a_store_is_refused() {
+        let (addr, _) = start();
+        let room = "a".repeat(64);
+        let mut d = conn(addr, &format!("DROP {room} 7 3"));
+        assert_eq!(read_line(&mut d).unwrap(), "ERR sem-armazenamento");
     }
 }

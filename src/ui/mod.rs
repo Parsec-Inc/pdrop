@@ -17,7 +17,7 @@ use bars::{firewall_bar, header, relay_bar};
 use eframe::egui::{self, Color32, Rect, pos2};
 use footer::footer;
 use input::{Act, apply, keys};
-use sidebar::{clips, history, transfers};
+use sidebar::{board, clips, history, transfers};
 use theme::S;
 use views::{grid, radar, sky};
 use widgets::{panel, pixel_frame};
@@ -77,7 +77,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         .size_range(260.0..=540.0)
         .show(ui, |ui| {
             panel(ui, &app.sp);
-            if app.hist_sel.is_some() {
+            if app.board {
+                board(ui, app)
+            } else if app.hist_sel.is_some() {
                 history(ui, app)
             } else if app.clip_sel.is_some() {
                 clips(ui, app)

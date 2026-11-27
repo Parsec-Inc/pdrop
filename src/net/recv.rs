@@ -3,7 +3,7 @@ use super::{
     bad, clean, eof, next_id, preview, pump,
 };
 use crate::{
-    clip,
+    clip, contacts,
     secure::{self, Secure},
 };
 use std::{
@@ -68,7 +68,7 @@ pub fn recv(
     let id = next_id();
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     let sec = secure::handshake(s, &policy.key, false)?;
-    let uid = sec.remote;
+    let (uid, key) = (sec.remote, sec.remote_key);
     let mut r = BufReader::new(sec);
     let mut line = String::new();
     (&mut r).take(4096).read_line(&mut line)?;
@@ -142,6 +142,9 @@ pub fn recv(
         tx.send(Msg::Ask(t.clone(), rtx)).ok();
         rrx.recv().unwrap_or(false)
     };
+    if ok {
+        contacts::learn(key);
+    }
     if ok && kind == 'b' && !granted {
         grants.lock().unwrap().insert(uid, t.peer.clone());
     }

@@ -441,6 +441,7 @@ mod tests {
             name: Default::default(),
             color: Default::default(),
             policy: Default::default(),
+            offline: None,
         };
         Control::new(
             dir.into(),

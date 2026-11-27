@@ -342,6 +342,9 @@ pub(super) fn footer(ui: &mut egui::Ui, app: &mut App, peers: &[Peer]) {
         if button(ui, sp, None, "Buscar", "F", can_search, searching).clicked() {
             act = Act::OpenSearch;
         }
+        if button(ui, sp, None, "Mensagens", "J", true, app.board.then_some(acc)).clicked() {
+            act = Act::Board;
+        }
         if button(ui, sp, None, "Relay", "W", true, relays_open).clicked() {
             act = Act::Relays;
         }

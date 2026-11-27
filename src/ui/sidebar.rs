@@ -91,9 +91,14 @@ pub(super) fn transfers(ui: &mut egui::Ui, app: &App) {
                                     MUTED,
                                 ));
                             }
-                            State::Done(_) if t.up && t.kind == 't' => {
-                                ui.label(txt("ok · enviado", OK));
+                            State::Done(m) if t.up && t.kind == 't' => {
                                 message(ui, &t.src, false);
+                                if m != "enviado" {
+                                    ui.label(txt(m.clone(), MUTED));
+                                }
+                            }
+                            State::Done(m) if t.kind == 't' => {
+                                message(ui, m, false);
                             }
                             State::Done(m) => {
                                 let pre = if !t.up && t.kind == 'f' {
@@ -134,6 +139,94 @@ fn message(ui: &mut egui::Ui, text: &str, open: bool) {
         s.push('…');
     }
     ui.add(egui::Label::new(s).wrap().selectable(open));
+}
+
+pub(super) fn board(ui: &mut egui::Ui, app: &App) {
+    let acc = app.acc();
+    ui.label(txt("MENSAGENS", MUTED));
+    ui.add_space(4.0 * S);
+    let live = app
+        .sel
+        .and_then(|id| app.peers.lock().unwrap().get(&id).cloned());
+    let offline = live.is_none();
+    let peer = live.or_else(|| app.sel.and_then(|id| app.known.get(&id).cloned()));
+    let Some(p) = peer else {
+        ui.label(txt("Escolha alguém no radar para ver a conversa.", MUTED));
+        return;
+    };
+    ui.label(txt(
+        format!(
+            "com {}{}",
+            p.name,
+            if offline { " · fora do radar, vai pela fila do relay" } else { "" }
+        ),
+        acc,
+    ));
+    ui.add_space(4.0 * S);
+    let mine = |uid: u128, name: &str| uid == p.uid || (uid == 0 && name == p.name);
+    let mut rows: Vec<(bool, String, String, Rgb)> = app
+        .hist
+        .iter()
+        .filter(|r| r.kind == 't' && mine(r.uid, &r.peer))
+        .map(|r| {
+            let (st, col) = if r.ok && r.label.ends_with("na fila") {
+                (format!("na fila do relay · {}", ago(r.ts)), MUTED)
+            } else if r.ok {
+                (ago(r.ts), MUTED)
+            } else {
+                (format!("falhou · {}", ago(r.ts)), WARN)
+            };
+            (r.up, r.detail.clone(), st, col)
+        })
+        .collect();
+    rows.extend(
+        app.xfers
+            .iter()
+            .filter(|t| {
+                t.kind == 't'
+                    && mine(t.uid, &t.peer)
+                    && matches!(t.state, State::Waiting | State::Active)
+            })
+            .map(|t| {
+                let (text, st) = if t.up {
+                    (t.src.clone(), "enviando…")
+                } else {
+                    ("…".to_string(), "recebendo…")
+                };
+                (t.up, text, st.to_string(), MUTED)
+            }),
+    );
+    if rows.is_empty() {
+        ui.label(txt("Nenhuma mensagem ainda.", FG));
+        ui.label(txt("Escreva em Enviar: texto livre vira mensagem.", MUTED));
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for (up, text, st, col) in rows {
+                let side = if up { egui::Align::Max } else { egui::Align::Min };
+                ui.with_layout(egui::Layout::top_down(side), |ui| {
+                    egui::Frame::NONE
+                        .fill(c(GRID))
+                        .inner_margin(egui::Margin::same((3.0 * S) as i8))
+                        .show(ui, |ui| {
+                            ui.set_max_width(ui.available_width() * 0.85);
+                            ui.add(
+                                egui::Label::new(RichText::new(text).color(c(if up {
+                                    acc
+                                } else {
+                                    FG
+                                })))
+                                .wrap()
+                                .selectable(true),
+                            );
+                        });
+                    ui.label(txt(st, col));
+                });
+                ui.add_space(4.0 * S);
+            }
+        });
 }
 
 pub(super) fn history(ui: &mut egui::Ui, app: &mut App) {

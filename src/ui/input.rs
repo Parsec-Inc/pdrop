@@ -25,6 +25,7 @@ pub(super) enum Act {
     Vis,
     View,
     Hist,
+    Board,
     More,
     Mark(bool),
     Clips,
@@ -79,6 +80,7 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
         Act::View => app.cycle_view(),
         Act::More => app.more = !app.more,
         Act::Hist => app.toggle_hist(),
+        Act::Board => app.toggle_board(),
         Act::Mark(all) => app.mark(peers, all),
         Act::Clips => app.toggle_clips(),
         Act::ClipStep(d) => app.clip_step(d),
@@ -98,12 +100,14 @@ pub(super) fn apply(app: &mut App, a: Act, peers: &[Peer]) {
                 && app.pick.is_none()
                 && app.pick_icon.is_none()
                 && app.hist_sel.is_none()
-                && app.clip_sel.is_none() =>
+                && app.clip_sel.is_none()
+                && !app.board =>
         {
             app.marked.clear()
         }
         Act::Cancel => {
             app.search = None;
+            app.board = false;
             (
                 app.input,
                 app.rename,
@@ -199,6 +203,7 @@ pub(super) fn keys(ctx: &egui::Context, app: &App) -> Act {
             _ if k(Key::M) => Act::Vis,
             _ if k(Key::D) => Act::View,
             _ if k(Key::G) => Act::Hist,
+            _ if k(Key::J) => Act::Board,
             _ if k(Key::O) => Act::More,
             _ if k(Key::A) => Act::Mark(i.modifiers.shift),
             _ if k(Key::P) => Act::Clips,
