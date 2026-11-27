@@ -320,7 +320,7 @@ fn poke(inbox: &Arc<Inbox>, cfg: &Arc<Config>, me: &Me) {
     let (inbox, cfg, me) = (inbox.clone(), cfg.clone(), me.clone());
     thread::spawn(move || {
         while inbox.again.swap(false, Ordering::SeqCst) {
-            if let Err(e) = pull(&cfg, &me, &deliver) {
+            if let Err(e) = pull(&cfg, &me, &*deliver) {
                 eprintln!("relay: não consegui buscar mensagens na fila: {e}");
                 break;
             }
